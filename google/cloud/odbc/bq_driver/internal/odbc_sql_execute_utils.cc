@@ -1075,6 +1075,14 @@ StatusRecordOr<DSResults> FetchBQData(
   stmt_handle.GetPagingInfo().job_id = pq_status->job_reference.job_id;
   stmt_handle.GetPagingInfo().page_token = pq_status->page_token;
 
+  PostQueryRequest actual_post_query_request = post_query_request;
+  if (!pq_status->job_reference.location.empty()) {
+    auto query_req = actual_post_query_request.query_request();
+    query_req.set_location(pq_status->job_reference.location);
+    actual_post_query_request.set_query_request(query_req);
+    stmt_handle.SetPostQueryRequest(actual_post_query_request);
+  }
+
   if (pq_status->job_complete && pq_status->page_token.empty()) {
     // Only one page of results, return it directly.
     results.data_source_results = *pq_status;
@@ -1090,7 +1098,7 @@ StatusRecordOr<DSResults> FetchBQData(
     if (!read_status.ok()) {
       LOG(WARNING) << "FetchBQDataReadFromJob failed: " << read_status.message
                    << ", falling back to FetchBQDataRead.";
-      read_status = FetchBQDataRead(stmt_handle, post_query_request);
+      read_status = FetchBQDataRead(stmt_handle, actual_post_query_request);
       if (!read_status.ok()) {
         return read_status;
       }
@@ -1106,7 +1114,7 @@ StatusRecordOr<DSResults> FetchBQData(
     results.data_source_results = *pq_status;
   } else {
     auto gq_status =
-        FetchNextPageOfQueryResults(stmt_handle, post_query_request);
+        FetchNextPageOfQueryResults(stmt_handle, actual_post_query_request);
     if (!gq_status) {
       LOG(ERROR) << "FetchBQData::FetchNextPageOfQueryResults:: "
                  << gq_status.GetStatusRecord().message;
