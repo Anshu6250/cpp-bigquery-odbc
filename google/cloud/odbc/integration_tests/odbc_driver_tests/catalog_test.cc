@@ -2229,7 +2229,6 @@ TEST(CatalogTest, SQLTables_NullCatalogFiltersToCurrentProject) {
 TEST(CatalogTest, SQLSpecialColumns_SQL_BEST_ROWID_TableWithPrimaryKeys) {
   auto conn = std::make_shared<ODBCHandles>();
   EXPECT_EQ(Connect(kDefaultConnectionString, conn), SQL_SUCCESS);
-  // CreateTableDirect(conn, kTableWithPKSchema);
 
   RowWiseResults special_columns = Catalog::GetSpecialColumns(
       conn, SQL_BEST_ROWID, kDatasetName, kCatalogDatasetTableWithPK);
@@ -2243,7 +2242,6 @@ TEST(CatalogTest, SQLSpecialColumns_SQL_BEST_ROWID_TableWithPrimaryKeys) {
 TEST(CatalogTest, SQLSpecialColumns_SQL_BEST_ROWID_TableWithoutPrimaryKeys) {
   auto conn = std::make_shared<ODBCHandles>();
   EXPECT_EQ(Connect(kDefaultConnectionString, conn), SQL_SUCCESS);
-  // CreateTableDirect(conn, kTableWithOutPKSchema);
 
   RowWiseResults special_columns = Catalog::GetSpecialColumns(
       conn, SQL_BEST_ROWID, kDatasetName, kCatalogDatasetTableWithoutPK);
@@ -2255,7 +2253,6 @@ TEST(CatalogTest, SQLSpecialColumns_SQL_BEST_ROWID_TableWithoutPrimaryKeys) {
 TEST(CatalogTest, SQLSpecialColumns_SQL_ROWVER) {
   auto conn = std::make_shared<ODBCHandles>();
   EXPECT_EQ(Connect(kDefaultConnectionString, conn), SQL_SUCCESS);
-  // CreateTableDirect(conn, kTableWithPKSchema);
 
   RowWiseResults special_columns = Catalog::GetSpecialColumns(
       conn, SQL_ROWVER, kDatasetName, kCatalogDatasetTableWithPK);
@@ -2267,7 +2264,6 @@ TEST(CatalogTest, SQLSpecialColumns_SQL_ROWVER) {
 TEST(CatalogTest, ANSI_SQLSpecialColumns_SQL_BEST_ROWID_TableWithPrimaryKeys) {
   auto conn = std::make_shared<ODBCHandles>();
   EXPECT_EQ(Connect(kDefaultConnectionString, conn, true), SQL_SUCCESS);
-  // CreateTableDirect(conn, kTableWithPKSchema, true);
 
   RowWiseResults special_columns = Catalog::GetSpecialColumns(
       conn, SQL_BEST_ROWID, kDatasetName, kCatalogDatasetTableWithPK,
@@ -2283,7 +2279,6 @@ TEST(CatalogTest,
      ANSI_SQLSpecialColumns_SQL_BEST_ROWID_TableWithoutPrimaryKeys) {
   auto conn = std::make_shared<ODBCHandles>();
   EXPECT_EQ(Connect(kDefaultConnectionString, conn, true), SQL_SUCCESS);
-  // CreateTableDirect(conn, kTableWithOutPKSchema, true);
 
   RowWiseResults special_columns = Catalog::GetSpecialColumns(
       conn, SQL_BEST_ROWID, kDatasetName, kCatalogDatasetTableWithoutPK,
@@ -2296,7 +2291,6 @@ TEST(CatalogTest,
 TEST(CatalogTest, ANSI_SQLSpecialColumns_SQL_ROWVER) {
   auto conn = std::make_shared<ODBCHandles>();
   EXPECT_EQ(Connect(kDefaultConnectionString, conn, true), SQL_SUCCESS);
-  // CreateTableDirect(conn, kTableWithPKSchema, true);
 
   RowWiseResults special_columns = Catalog::GetSpecialColumns(
       conn, SQL_ROWVER, kDatasetName, kCatalogDatasetTableWithPK,
