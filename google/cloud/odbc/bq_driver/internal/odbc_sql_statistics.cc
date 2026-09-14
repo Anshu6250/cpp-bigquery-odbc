@@ -144,8 +144,8 @@ StatusRecordOr<ResultSet> FetchStatisticsResultSet(
 
   // 7: TYPE — SQL_TABLE_STAT (0) indicates this is a table statistics row
   DSValue ds_type;
-  ArithmeticToDSValue<SQLSMALLINT>(static_cast<SQLSMALLINT>(SQL_TABLE_STAT),
-                                   ds_type);
+  ArithmeticToDSValue<SQLBIGINT>(static_cast<SQLBIGINT>(SQL_TABLE_STAT),
+                                 ds_type);
   ds_row.push_back(ds_type);
 
   // 8: ORDINAL_POSITION — NULL for SQL_TABLE_STAT rows
