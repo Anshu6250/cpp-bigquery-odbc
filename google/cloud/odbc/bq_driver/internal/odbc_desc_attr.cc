@@ -573,13 +573,12 @@ void DescriptorRecord::ApplyMetadataIrdOverrides(std::string const& col_name) {
       col_name == "SQL_DATETIME_SUB" || col_name == "KEY_SEQ" ||
       col_name == "UPDATE_RULE" || col_name == "DELETE_RULE" ||
       col_name == "DEFERRABILITY" || col_name == "NON_UNIQUE" ||
-      col_name == "TYPE" || col_name == "SCOPE" ||
-      col_name == "PSEUDO_COLUMN";
+      col_name == "TYPE" || col_name == "SCOPE" || col_name == "PSEUDO_COLUMN";
 
-  bool const is_integer =
-      col_name == "COLUMN_SIZE" || col_name == "BUFFER_LENGTH" ||
-      col_name == "ORDINAL_POSITION" || col_name == "CARDINALITY" ||
-      col_name == "PAGES";
+  bool const is_integer = col_name == "COLUMN_SIZE" ||
+                          col_name == "BUFFER_LENGTH" ||
+                          col_name == "ORDINAL_POSITION" ||
+                          col_name == "CARDINALITY" || col_name == "PAGES";
 
   bool const is_wchar_one = col_name == "ASC_OR_DESC";
 
