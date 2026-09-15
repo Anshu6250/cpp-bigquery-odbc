@@ -42,7 +42,15 @@ StatusRecordOr<std::string> ConvertFromCharBuffer(DataBuffer& src_data,
   std::string src_str;
   switch (src_data.type) {
     case SQL_C_CHAR: {
-      if (src_buf == nullptr || result_len <= 0) {
+      if (src_buf == nullptr) {
+        src_str = "";
+        break;
+      }
+      if (result_len == SQL_NTS) {
+        src_str = std::string(static_cast<char*>(src_buf));
+        break;
+      }
+      if (result_len <= 0) {
         src_str = "";
         break;
       }

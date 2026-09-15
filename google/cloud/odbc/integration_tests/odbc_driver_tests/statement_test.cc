@@ -4458,4 +4458,169 @@ INSTANTIATE_TEST_SUITE_P(
                         SQL_ROLLBACK, static_cast<SQLBIGINT>(1)),
         std::make_tuple("1", "ODBC_IGNORE_TRANSACTIONS_ON_COMMIT", SQL_COMMIT,
                         static_cast<SQLBIGINT>(1))));
+
+TEST(StatementTest, SQLExecute_ParameterArrayInsert) {
+  constexpr SQLULEN kBatchSize = 10;
+
+  auto conn = std::make_shared<ODBCHandles>();
+  auto const table_name =
+      kDatasetWithTablePrefix + "ODBC_PARAM_ARRAY_INSERT_TEST";
+  Table table(table_name);
+
+  EXPECT_EQ(Connect(kDefaultConnectionString, conn), SQL_SUCCESS);
+  table.CreateWithPrepare(conn, "(id INT64, name STRING)");
+
+  auto const insert_query =
+      "INSERT INTO " + table_name + " (id, name) VALUES (?, ?)";
+
+  EXPECT_EQ(SQLPrepare(conn->hstmt, (SQLCHAR*)insert_query.c_str(), SQL_NTS),
+            SQL_SUCCESS);
+
+  // Column-wise parameter arrays.
+  std::vector<SQLBIGINT> ids(kBatchSize);
+  std::vector<std::array<char, 16>> names(kBatchSize);
+  std::vector<SQLLEN> id_indicators(kBatchSize, sizeof(SQLBIGINT));
+  std::vector<SQLLEN> name_indicators(kBatchSize, SQL_NTS);
+
+  for (SQLULEN i = 0; i < kBatchSize; ++i) {
+    ids[i] = static_cast<SQLBIGINT>(i + 1);
+
+    std::fill(names[i].begin(), names[i].end(), '\0');
+    std::strcpy(names[i].data(), "test");
+  }
+
+  SQLULEN params_processed = 0;
+  std::vector<SQLUSMALLINT> param_status(kBatchSize, 0);
+
+  // Tell the driver that this is a parameter-array execution.
+  EXPECT_EQ(SQLSetStmtAttr(conn->hstmt, SQL_ATTR_PARAMSET_SIZE,
+                           reinterpret_cast<SQLPOINTER>(kBatchSize), 0),
+            SQL_SUCCESS);
+  EXPECT_EQ(SQLSetStmtAttr(conn->hstmt, SQL_ATTR_PARAMS_PROCESSED_PTR,
+                           &params_processed, 0),
+            SQL_SUCCESS);
+  EXPECT_EQ(SQLSetStmtAttr(conn->hstmt, SQL_ATTR_PARAM_STATUS_PTR,
+                           param_status.data(), 0),
+            SQL_SUCCESS);
+
+  // Bind parameter 1: id.
+  EXPECT_EQ(SQLBindParameter(conn->hstmt, 1, SQL_PARAM_INPUT, SQL_C_SBIGINT,
+                             SQL_BIGINT, 0, 0, ids.data(), sizeof(SQLBIGINT),
+                             id_indicators.data()),
+            SQL_SUCCESS);
+
+  // Bind parameter 2: name.
+  EXPECT_EQ(
+      SQLBindParameter(conn->hstmt, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                       16, 0, names.data(), 16, name_indicators.data()),
+      SQL_SUCCESS);
+
+  // Execute all parameter sets in one execution.
+  EXPECT_EQ(SQLExecute(conn->hstmt), SQL_SUCCESS);
+
+  EXPECT_EQ(params_processed, kBatchSize);
+  for (SQLULEN i = 0; i < kBatchSize; ++i) {
+    EXPECT_EQ(param_status[i], SQL_PARAM_SUCCESS);
+  }
+
+  // Verify that all rows were inserted.
+  EXPECT_EQ(SQLFreeStmt(conn->hstmt, SQL_CLOSE), SQL_SUCCESS);
+  EXPECT_EQ(SQLPrepare(conn->hstmt,
+                       (SQLCHAR*)("SELECT COUNT(*) FROM " + table_name).c_str(),
+                       SQL_NTS),
+            SQL_SUCCESS);
+
+  EXPECT_EQ(SQLExecute(conn->hstmt), SQL_SUCCESS);
+  EXPECT_EQ(SQLFetch(conn->hstmt), SQL_SUCCESS);
+
+  SQLBIGINT row_count = 0;
+  SQLLEN row_count_ind = 0;
+
+  EXPECT_EQ(SQLGetData(conn->hstmt, 1, SQL_C_SBIGINT, &row_count,
+                       sizeof(row_count), &row_count_ind),
+            SQL_SUCCESS);
+
+  EXPECT_EQ(row_count, kBatchSize);
+
+  EXPECT_EQ(SQLFreeStmt(conn->hstmt, SQL_CLOSE), SQL_SUCCESS);
+  table.DropWithPrepare(conn);
+  EXPECT_EQ(Disconnect(conn), SQL_SUCCESS);
+}
+
+TEST(StatementTest, SQLExecute_RebindAfterExecute) {
+  auto conn = std::make_shared<ODBCHandles>();
+  auto const table_name =
+      kDatasetWithTablePrefix + "ODBC_REBIND_AFTER_EXECUTE_TEST";
+  Table table(table_name);
+
+  EXPECT_EQ(Connect(kDefaultConnectionString, conn), SQL_SUCCESS);
+  table.CreateWithPrepare(conn, "(id INT64, name STRING)");
+
+  auto const insert_query =
+      "INSERT INTO " + table_name + " (id, name) VALUES (?, ?)";
+
+  EXPECT_EQ(SQLPrepare(conn->hstmt, (SQLCHAR*)insert_query.c_str(), SQL_NTS),
+            SQL_SUCCESS);
+
+  SQLINTEGER id = 1;
+  char name[16] = "test";
+
+  SQLLEN id_indicator = sizeof(SQLINTEGER);
+  SQLLEN name_indicator = SQL_NTS;
+
+  // Bind parameter 1: id.
+  EXPECT_EQ(
+      SQLBindParameter(conn->hstmt, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_BIGINT,
+                       0, 0, &id, sizeof(SQLINTEGER), &id_indicator),
+      SQL_SUCCESS);
+
+  // Bind parameter 2: name.
+  EXPECT_EQ(
+      SQLBindParameter(conn->hstmt, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                       16, 0, name, sizeof(name), &name_indicator),
+      SQL_SUCCESS);
+
+  // First execution.
+  EXPECT_EQ(SQLExecute(conn->hstmt), SQL_SUCCESS);
+
+  // Re-bind parameters with new values on the same prepared statement.
+  id = 2;
+
+  EXPECT_EQ(
+      SQLBindParameter(conn->hstmt, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_BIGINT,
+                       0, 0, &id, sizeof(SQLINTEGER), &id_indicator),
+      SQL_SUCCESS);
+
+  EXPECT_EQ(
+      SQLBindParameter(conn->hstmt, 2, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_VARCHAR,
+                       16, 0, name, sizeof(name), &name_indicator),
+      SQL_SUCCESS);
+
+  // Second execution.
+  EXPECT_EQ(SQLExecute(conn->hstmt), SQL_SUCCESS);
+
+  // Verify that both rows were inserted.
+  EXPECT_EQ(SQLFreeStmt(conn->hstmt, SQL_CLOSE), SQL_SUCCESS);
+  EXPECT_EQ(SQLPrepare(conn->hstmt,
+                       (SQLCHAR*)("SELECT COUNT(*) FROM " + table_name).c_str(),
+                       SQL_NTS),
+            SQL_SUCCESS);
+
+  EXPECT_EQ(SQLExecute(conn->hstmt), SQL_SUCCESS);
+  EXPECT_EQ(SQLFetch(conn->hstmt), SQL_SUCCESS);
+
+  SQLBIGINT row_count = 0;
+  SQLLEN row_count_ind = 0;
+
+  EXPECT_EQ(SQLGetData(conn->hstmt, 1, SQL_C_SBIGINT, &row_count,
+                       sizeof(row_count), &row_count_ind),
+            SQL_SUCCESS);
+
+  EXPECT_EQ(row_count, 2);
+
+  EXPECT_EQ(SQLFreeStmt(conn->hstmt, SQL_CLOSE), SQL_SUCCESS);
+  table.DropWithPrepare(conn);
+  EXPECT_EQ(Disconnect(conn), SQL_SUCCESS);
+}
+
 }  // namespace google::cloud::odbc_tests

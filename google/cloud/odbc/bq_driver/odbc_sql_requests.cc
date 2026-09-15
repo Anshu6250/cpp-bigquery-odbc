@@ -247,60 +247,100 @@ StatusRecord ActuallyProcessExecute(StatementHandle& stmt_handle,
 
   // We assume that the dry run job would detect the `location` properly.
   // The execution utils `FetchBQData` and others will use it through the
-  // `PostQueryRequest`. `SetPostQueryRequest` called subsequently caches it in
-  // the statement_handle, so it will can be used for next pages as well.
-  PostQueryRequest post_request =
-      ConstructBasicPostQueryRequest(conn_handle, query_str, query_timeout,
-                                     prepared_job.job_reference.location);
-
   std::vector<QueryParameter> basic_query_params =
       stmt_handle.GetQueryParameters();
   DescriptorHandle& apd = stmt_handle.GetDescriptorHandle(DescriptorType::kAPD);
   DescriptorHandle& ipd = stmt_handle.GetDescriptorHandle(DescriptorType::kIPD);
 
-  std::vector<QueryParameter>& query_params = stmt_handle.GetQueryParameters();
-  if (!query_params.empty()) {
-    StatusRecord status = ConstructPositionalQueryParams(apd, ipd, query_params,
-                                                         is_data_buff_req);
-    if (!status.ok()) {
-      LOG(ERROR) << "ActuallyProcessExecute::ConstructPositionalQueryParams::"
-                 << status.message;
-      return status;
-    }
-
-    QueryRequest query_request = post_request.query_request();
-    query_request.set_query_parameters(query_params);
-    post_request.set_query_request(query_request);
-  }
-  stmt_handle.SetPostQueryRequest(post_request);
+  SQLULEN array_size =
+      basic_query_params.empty() ? 1 : apd.GetHeaderRecord().array_size;
+  if (array_size == 0) array_size = 1;
+  SQLULEN* rows_processed_ptr = ipd.GetHeaderRecord().rows_processed_ptr;
+  SQLUSMALLINT* param_status_ptr = ipd.GetHeaderRecord().array_status_ptr;
+  if (rows_processed_ptr) *rows_processed_ptr = 0;
 
   std::string statement_type =
       prepared_job.statistics.job_query_stats.statement_type;
   std::string sub_statement_type;
   StatusRecordOr<DSResults> ds_status_record_or;
+  std::int64_t total_dml_affected_rows = 0;
 
-  // Execute the script or fetch data based on statement type
-  if (statement_type == "SCRIPT") {
-    ds_status_record_or = ExecuteScript(stmt_handle, post_request);
-  } else {
-    if (statement_type == "SELECT") {
-      // It doesn't make sense to read from HTAPI if it is not a select
-      // statement. We get an error otherwise:
-      // "Cannot set destination table in jobs with DDL statements"
-      ds_status_record_or = FetchBQData(stmt_handle, post_request, true);
-    } else {
-      ds_status_record_or = FetchBQData(stmt_handle, post_request);
+  bool has_errors = false;
+  bool any_success = false;
+  StatusRecord last_error;
+  DSResults combined_ds_results;
+
+  for (SQLULEN i = 0; i < array_size; i++) {
+    // We assume that the dry run job would detect the `location` properly.
+    // The execution utils `FetchBQData` and others will use it through the
+    // `PostQueryRequest`. `SetPostQueryRequest` called subsequently caches it
+    // in the statement_handle, so it will can be used for next pages as well.
+    PostQueryRequest post_request =
+        ConstructBasicPostQueryRequest(conn_handle, query_str, query_timeout,
+                                       prepared_job.job_reference.location);
+    std::vector<QueryParameter> query_params = basic_query_params;
+    if (!query_params.empty()) {
+      StatusRecord status = ConstructPositionalQueryParams(
+          apd, ipd, query_params, is_data_buff_req, i);
+      if (!status.ok()) {
+        LOG(ERROR) << "ActuallyProcessExecute::ConstructPositionalQueryParams::"
+                   << status.message;
+        if (param_status_ptr) param_status_ptr[i] = SQL_PARAM_ERROR;
+        if (rows_processed_ptr) *rows_processed_ptr = i + 1;
+        has_errors = true;
+        last_error = status;
+        continue;
+      }
+
+      QueryRequest query_request = post_request.query_request();
+      query_request.set_query_parameters(query_params);
+
+      // Generate a unique requestId to bypass BigQuery's job deduplication
+      // when executing the exact same query with different parameters in a
+      // tight loop.
+      std::string unique_req_id =
+          "odbc_batch_" +
+          std::to_string(
+              std::chrono::system_clock::now().time_since_epoch().count()) +
+          "_" + std::to_string(i);
+      query_request.set_request_id(unique_req_id);
+
+      post_request.set_query_request(query_request);
     }
+    stmt_handle.SetPostQueryRequest(post_request);
+
+    // Execute the script or fetch data based on statement type
+    if (statement_type == "SCRIPT") {
+      ds_status_record_or = ExecuteScript(stmt_handle, post_request);
+    } else {
+      bool const with_htapi = (statement_type == "SELECT");
+      ds_status_record_or = FetchBQData(stmt_handle, post_request, with_htapi);
+    }
+
+    if (!ds_status_record_or) {
+      LOG(ERROR) << "ActuallyProcessExecute::FetchBQData:: "
+                 << ds_status_record_or.GetStatusRecord().message;
+      if (param_status_ptr) param_status_ptr[i] = SQL_PARAM_ERROR;
+      if (rows_processed_ptr) *rows_processed_ptr = i + 1;
+      has_errors = true;
+      last_error = ds_status_record_or.GetStatusRecord();
+      continue;
+    }
+
+    any_success = true;
+    combined_ds_results = *ds_status_record_or;
+    if (param_status_ptr) param_status_ptr[i] = SQL_PARAM_SUCCESS;
+    if (rows_processed_ptr) *rows_processed_ptr = i + 1;
+    total_dml_affected_rows += ds_status_record_or->num_dml_affected_rows;
   }
 
-  if (!ds_status_record_or) {
+  if (!any_success && has_errors) {
     stmt_handle.SetStmtState(failure_state);
-    LOG(ERROR) << "ActuallyProcessExecute::FetchBQData:: "
-               << ds_status_record_or.GetStatusRecord().message;
-    return ds_status_record_or.GetStatusRecord();
+    return last_error;
   }
 
-  stmt_handle.SetDSResults(*ds_status_record_or);
+  combined_ds_results.num_dml_affected_rows = total_dml_affected_rows;
+  stmt_handle.SetDSResults(combined_ds_results);
 
   // If the statement was a script, retrieve sub-statement type
   if (statement_type == "SCRIPT" && stmt_handle.HasJobData()) {
@@ -314,7 +354,7 @@ StatusRecord ActuallyProcessExecute(StatementHandle& stmt_handle,
   }
 
   // Process DSResults into a ResultSet
-  auto rs_status_record_or = ProcessQueryResults(*ds_status_record_or);
+  auto rs_status_record_or = ProcessQueryResults(combined_ds_results);
   if (!rs_status_record_or) {
     stmt_handle.SetStmtState(failure_state);
     LOG(ERROR) << "ActuallyProcessExecute::ProcessQueryResults::"
@@ -341,7 +381,7 @@ StatusRecord ActuallyProcessExecute(StatementHandle& stmt_handle,
     stmt_handle.SetResultSet(result_set);
   } else if ((statement_type == "UPDATE" || statement_type == "INSERT" ||
               statement_type == "DELETE") &&
-             ds_status_record_or->num_dml_affected_rows == 0) {
+             combined_ds_results.num_dml_affected_rows == 0) {
     stmt_handle.SetStmtState(StmtStates::kStatementExecutedWithoutRs);
     // Note: The message is not supposed to be propagated to the application in
     // case of SQL_NO_DATA
@@ -351,6 +391,9 @@ StatusRecord ActuallyProcessExecute(StatementHandle& stmt_handle,
     stmt_handle.SetStmtState(StmtStates::kStatementExecutedWithoutRs);
   }
 
+  if (has_errors) {
+    return StatusRecord{SQLStates::k_01S01(), "Error in row"};
+  }
   return StatusRecord::Ok();
 }
 
@@ -956,8 +999,7 @@ SQLRETURN SQLExecuteInternal(SQLHSTMT statement_handle) {
     return LogAndReturnCode(stmt_handle, status_record);
   }
 
-  if (stmt_handle.GetStmtState() == StmtStates::kStatementExecutedWithoutRs ||
-      stmt_handle.GetStmtState() == StmtStates::kStatementExecutedWithRs) {
+  if (stmt_handle.GetStmtState() == StmtStates::kStatementExecutedWithRs) {
     StatusRecord status_record = {
         SQLStates::k_HY010(),
         "Function sequence error - statement has already executed"};
