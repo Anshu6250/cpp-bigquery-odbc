@@ -92,6 +92,8 @@ size_t NormalizeBufferSize(int size, size_t max_size = 256);
 
 size_t BufferSizeForType(SQLSMALLINT type, size_t requested);
 
+SQLLEN GetElemSize(SQLSMALLINT target_c_type, SQLLEN app_buffer_len);
+
 // -----------------------------------------------------------------------------
 // Generic Parallel Execution Utility
 // -----------------------------------------------------------------------------

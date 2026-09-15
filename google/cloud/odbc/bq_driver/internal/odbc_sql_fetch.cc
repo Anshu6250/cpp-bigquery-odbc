@@ -123,8 +123,7 @@ StatusRecord WriteDSRow(DSRow const& ds_row, RowSchema const& schema,
     SQLLEN elem_size, elem_size_ind;
     SQLINTEGER bind_type = ard.GetHeaderRecord().bind_type;
     if (bind_type == SQL_BIND_BY_COLUMN) {
-      elem_size =
-          BufferSizeForType(col_desc.concise_type, col_desc.octet_length);
+      elem_size = GetElemSize(col_desc.concise_type, col_desc.octet_length);
       elem_size_ind = sizeof(SQLLEN);
     } else {
       elem_size = bind_type;

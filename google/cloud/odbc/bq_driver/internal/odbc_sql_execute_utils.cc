@@ -78,7 +78,7 @@ StatusRecord ConstructPositionalQueryParams(
     if (bind_type == SQL_BIND_BY_COLUMN) {
       SQLSMALLINT target_c_type = apd_rec.concise_type;
       SQLLEN app_buffer_len = apd_rec.octet_length;
-      elem_size = BufferSizeForType(target_c_type, app_buffer_len);
+      elem_size = GetElemSize(target_c_type, app_buffer_len);
       elem_size_ind = sizeof(SQLLEN);
     } else {
       elem_size = bind_type;

@@ -261,6 +261,66 @@ size_t BufferSizeForType(SQLSMALLINT type, size_t requested) {
   return std::max(requested, minimum_size);
 }
 
+SQLLEN GetElemSize(SQLSMALLINT target_c_type, SQLLEN app_buffer_len) {
+  switch (target_c_type) {
+    case SQL_C_CHAR:
+    case SQL_C_WCHAR:
+    case SQL_C_BINARY:
+      return app_buffer_len;
+    case SQL_C_SSHORT:
+    case SQL_C_SHORT:
+      return sizeof(SQLSMALLINT);
+    case SQL_C_USHORT:
+      return sizeof(SQLUSMALLINT);
+    case SQL_C_SLONG:
+    case SQL_C_LONG:
+      return sizeof(SQLINTEGER);
+    case SQL_C_ULONG:
+      return sizeof(SQLUINTEGER);
+    case SQL_C_FLOAT:
+      return sizeof(SQLREAL);
+    case SQL_C_DOUBLE:
+      return sizeof(SQLDOUBLE);
+    case SQL_C_BIT:
+      return sizeof(SQLCHAR);
+    case SQL_C_STINYINT:
+    case SQL_C_TINYINT:
+      return sizeof(SQLSCHAR);
+    case SQL_C_UTINYINT:
+      return sizeof(SQLCHAR);
+    case SQL_C_SBIGINT:
+      return sizeof(SQLBIGINT);
+    case SQL_C_UBIGINT:
+      return sizeof(SQLUBIGINT);
+    case SQL_C_NUMERIC:
+      return sizeof(SQL_NUMERIC_STRUCT);
+    case SQL_C_TYPE_DATE:
+      return sizeof(SQL_DATE_STRUCT);
+    case SQL_C_TYPE_TIME:
+      return sizeof(SQL_TIME_STRUCT);
+    case SQL_C_TYPE_TIMESTAMP:
+      return sizeof(SQL_TIMESTAMP_STRUCT);
+    case SQL_C_INTERVAL_YEAR:
+    case SQL_C_INTERVAL_MONTH:
+    case SQL_C_INTERVAL_YEAR_TO_MONTH:
+    case SQL_C_INTERVAL_DAY:
+    case SQL_C_INTERVAL_HOUR:
+    case SQL_C_INTERVAL_MINUTE:
+    case SQL_C_INTERVAL_SECOND:
+    case SQL_C_INTERVAL_DAY_TO_HOUR:
+    case SQL_C_INTERVAL_DAY_TO_MINUTE:
+    case SQL_C_INTERVAL_DAY_TO_SECOND:
+    case SQL_C_INTERVAL_HOUR_TO_MINUTE:
+    case SQL_C_INTERVAL_HOUR_TO_SECOND:
+    case SQL_C_INTERVAL_MINUTE_TO_SECOND:
+      return sizeof(SQL_INTERVAL_STRUCT);
+    case SQL_C_GUID:
+      return sizeof(SQLGUID);
+    default:
+      return app_buffer_len;
+  }
+}
+
 std::vector<std::string> Split(std::string const& s,
                                std::string const& delimiter, int limit) {
   int start_ind = 0;

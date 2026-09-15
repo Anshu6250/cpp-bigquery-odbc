@@ -2,9 +2,11 @@ build/
 build-perf/
 build-main/
 build-perf-main/
+build-unit/
 cmake-out/
 cmake-build-debug/
 build-out/
+dist/
 vcpkg_installed/
 .vscode/
 ci/gcloud
