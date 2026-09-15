@@ -16,6 +16,7 @@
 #include "google/cloud/odbc/bq_driver/internal/data_translation.h"
 #include "google/cloud/odbc/bq_driver/internal/odbc_sql_execute_utils.h"
 #include "google/cloud/odbc/bq_driver/internal/trace_utils.h"
+#include "google/cloud/odbc/bq_driver/internal/utils.h"
 
 namespace google::cloud::odbc_bq_driver_internal {
 
@@ -102,51 +103,6 @@ StatusRecord WriteToApplicationBuffer(DSValue const& ds_val,
   return {SQLStates::k_HYC00(), "Data type not supported"};
 }
 
-// This is according to the spec:
-// https://learn.microsoft.com/en-us/sql/odbc/reference/syntax/sqlbindcol-function?view=sql-server-ver16#buffer-addresses
-SQLLEN GetElemSize(DescriptorRecord& app_desc_rec) {
-  SQLSMALLINT target_c_type = app_desc_rec.concise_type;
-  SQLLEN app_buffer_len = app_desc_rec.octet_length;
-  switch (target_c_type) {
-    case SQL_C_CHAR:
-    case SQL_C_WCHAR:
-    case SQL_C_BINARY:
-      return app_buffer_len;
-    case SQL_C_SSHORT:
-      return sizeof(SQLSMALLINT);
-    case SQL_C_USHORT:
-      return sizeof(SQLUSMALLINT);
-    case SQL_C_SLONG:
-      return sizeof(SQLINTEGER);
-    case SQL_C_ULONG:
-      return sizeof(SQLUINTEGER);
-    case SQL_C_FLOAT:
-      return sizeof(SQLREAL);
-    case SQL_C_DOUBLE:
-      return sizeof(SQLDOUBLE);
-    case SQL_C_BIT:
-      return sizeof(SQLCHAR);
-    case SQL_C_STINYINT:
-      return sizeof(SQLSCHAR);
-    case SQL_C_UTINYINT:
-      return sizeof(SQLCHAR);
-    case SQL_C_SBIGINT:
-      return sizeof(SQLBIGINT);
-    case SQL_C_UBIGINT:
-      return sizeof(SQLUBIGINT);
-    case SQL_C_NUMERIC:
-      return sizeof(SQL_NUMERIC_STRUCT);
-    case SQL_C_TYPE_DATE:
-      return sizeof(SQL_DATE_STRUCT);
-    case SQL_C_TYPE_TIME:
-      return sizeof(SQL_TIME_STRUCT);
-    case SQL_C_TYPE_TIMESTAMP:
-      return sizeof(SQL_TIMESTAMP_STRUCT);
-    default:
-      return 0;
-  }
-}
-
 StatusRecord WriteDSRow(DSRow const& ds_row, RowSchema const& schema,
                         DescriptorHandle& ard, int row_num) {
   SQLLEN* bind_offset_ptr = ard.GetHeaderRecord().bind_offset_ptr;
@@ -167,7 +123,8 @@ StatusRecord WriteDSRow(DSRow const& ds_row, RowSchema const& schema,
     SQLLEN elem_size, elem_size_ind;
     SQLINTEGER bind_type = ard.GetHeaderRecord().bind_type;
     if (bind_type == SQL_BIND_BY_COLUMN) {
-      elem_size = GetElemSize(col_desc);
+      elem_size =
+          BufferSizeForType(col_desc.concise_type, col_desc.octet_length);
       elem_size_ind = sizeof(SQLLEN);
     } else {
       elem_size = bind_type;

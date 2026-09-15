@@ -16,6 +16,7 @@
 #include "google/cloud/odbc/bq_client_interface/utils.h"
 #include "google/cloud/odbc/bq_driver/internal/odbc_internal_commons.h"
 #include "google/cloud/odbc/bq_driver/internal/trace_utils.h"
+#include "google/cloud/odbc/bq_driver/internal/utils.h"
 #include "absl/time/civil_time.h"
 #include "absl/time/time.h"
 #if (!defined(_WIN32) || defined(_WIN64)) && !defined(NO_ARROW)
@@ -55,7 +56,8 @@ using chrono_ms = std::chrono::milliseconds;
 
 StatusRecord ConstructPositionalQueryParams(
     DescriptorHandle& apd, DescriptorHandle& ipd,
-    std::vector<QueryParameter>& basic_query_params, bool is_data_buff_req) {
+    std::vector<QueryParameter>& basic_query_params, bool is_data_buff_req,
+    int paramset_index) {
   std::vector<SQLLEN> owned_octet_lengths;  // Owns any needed octet lengths
   for (int param_ind = 0; param_ind < basic_query_params.size(); param_ind++) {
     if (!apd.HasDescriptorRecord(param_ind + 1)) {
@@ -68,16 +70,46 @@ StatusRecord ConstructPositionalQueryParams(
     }
 
     DescriptorRecord& apd_rec = apd.GetDescriptorRecord(param_ind + 1);
+    SQLLEN* bind_offset_ptr = apd.GetHeaderRecord().bind_offset_ptr;
+    SQLLEN bind_offset = bind_offset_ptr ? *bind_offset_ptr : 0;
+    SQLINTEGER bind_type = apd.GetHeaderRecord().bind_type;
+
+    SQLLEN elem_size = 0, elem_size_ind = 0;
+    if (bind_type == SQL_BIND_BY_COLUMN) {
+      SQLSMALLINT target_c_type = apd_rec.concise_type;
+      SQLLEN app_buffer_len = apd_rec.octet_length;
+      elem_size = BufferSizeForType(target_c_type, app_buffer_len);
+      elem_size_ind = sizeof(SQLLEN);
+    } else {
+      elem_size = bind_type;
+      elem_size_ind = bind_type;
+    }
+
+    SQLLEN row_offset = paramset_index * elem_size;
+    SQLLEN row_offset_ind = paramset_index * elem_size_ind;
+
+    SQLLEN* indicator_ptr = apd_rec.indicator_ptr;
+    if (indicator_ptr) {
+      indicator_ptr =
+          reinterpret_cast<SQLLEN*>(reinterpret_cast<char*>(indicator_ptr) +
+                                    bind_offset + row_offset_ind);
+    }
+    SQLLEN* octet_length_ptr = apd_rec.octet_length_ptr;
+    if (octet_length_ptr) {
+      octet_length_ptr =
+          reinterpret_cast<SQLLEN*>(reinterpret_cast<char*>(octet_length_ptr) +
+                                    bind_offset + row_offset_ind);
+    }
+
     // SQL_NULL_DATA implies the application wants to use empty data.
-    if (apd_rec.indicator_ptr != nullptr &&
-        *apd_rec.indicator_ptr == SQL_NULL_DATA) {
+    if (indicator_ptr != nullptr && *indicator_ptr == SQL_NULL_DATA) {
+      basic_query_params[param_ind].parameter_value.value = "";
       continue;
     }
 
     bool is_data_at_exec = false;
-    if (apd_rec.indicator_ptr &&
-        (*(apd_rec.indicator_ptr) == SQL_DATA_AT_EXEC ||
-         *(apd_rec.indicator_ptr) <= SQL_LEN_DATA_AT_EXEC_OFFSET)) {
+    if (indicator_ptr && (*indicator_ptr == SQL_DATA_AT_EXEC ||
+                          *indicator_ptr <= SQL_LEN_DATA_AT_EXEC_OFFSET)) {
       is_data_at_exec = true;
     }
 
@@ -104,16 +136,22 @@ StatusRecord ConstructPositionalQueryParams(
         ((is_data_buff_req && is_data_at_exec) && !apd_rec.data_buffer.empty())
             ? static_cast<SQLPOINTER>(apd_rec.data_buffer.data())
             : apd_rec.data_ptr;
+    if (buff && !((is_data_buff_req && is_data_at_exec) &&
+                  !apd_rec.data_buffer.empty())) {
+      buff = static_cast<char*>(buff) + bind_offset + row_offset;
+    }
+
     DataBuffer data;
     if (is_data_buff_req && is_data_at_exec) {
       owned_octet_lengths.push_back(static_cast<SQLLEN>(
           apd_rec.data_buffer
               .size()));  // Handle stack-use-after-scope for octet_length
-      SQLLEN* octet_length_ptr = &owned_octet_lengths.back();
-      data = {apd_rec.concise_type, buff, *octet_length_ptr, octet_length_ptr};
+      SQLLEN* temp_octet_length_ptr = &owned_octet_lengths.back();
+      data = {apd_rec.concise_type, buff, *temp_octet_length_ptr,
+              temp_octet_length_ptr};
     } else {
       data = {apd_rec.concise_type, buff, apd_rec.octet_length,
-              apd_rec.octet_length_ptr};
+              octet_length_ptr};
     }
 
     DescriptorRecord& ipd_rec = ipd.GetDescriptorRecord(param_ind + 1);

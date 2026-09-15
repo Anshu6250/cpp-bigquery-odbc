@@ -83,6 +83,113 @@ TEST(ConstructPositionalQueryParams, Basic) {
   EXPECT_EQ(query_params[2].parameter_value.value, "Testing String");
 }
 
+TEST(ConstructPositionalQueryParams, ParameterArrayColumnWise) {
+  DescriptorHandle apd(DescriptorType::kAPD, SQL_DESC_ALLOC_AUTO);
+  DescriptorHandle ipd(DescriptorType::kIPD, SQL_DESC_ALLOC_AUTO);
+
+  std::vector<SQLBIGINT> ids = {101, 102, 103};
+  std::vector<SQLLEN> id_inds = {sizeof(SQLBIGINT), sizeof(SQLBIGINT),
+                                 sizeof(SQLBIGINT)};
+
+  std::vector<std::array<char, 16>> names(3);
+  std::strcpy(names[0].data(), "Alice");
+  std::strcpy(names[1].data(), "Bob");
+  std::strcpy(names[2].data(), "Charlie");
+  std::vector<SQLLEN> name_inds = {SQL_NTS, SQL_NTS, SQL_NTS};
+
+  PopulateDescriptors(apd, ipd, 1, SQL_C_SBIGINT, SQL_BIGINT, ids.data(),
+                      sizeof(SQLBIGINT), id_inds.data());
+  PopulateDescriptors(apd, ipd, 2, SQL_C_CHAR, SQL_VARCHAR, names.data(), 16,
+                      name_inds.data());
+
+  QueryParameter id_param;
+  id_param.parameter_type.type = "INT64";
+  QueryParameter name_param;
+  name_param.parameter_type.type = "STRING";
+
+  // Test row 0
+  std::vector<QueryParameter> params0 = {id_param, name_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params0, false, 0).ok());
+  EXPECT_EQ(params0[0].parameter_value.value, "101");
+  EXPECT_EQ(params0[1].parameter_value.value, "Alice");
+
+  // Test row 1
+  std::vector<QueryParameter> params1 = {id_param, name_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params1, false, 1).ok());
+  EXPECT_EQ(params1[0].parameter_value.value, "102");
+  EXPECT_EQ(params1[1].parameter_value.value, "Bob");
+
+  // Test row 2
+  std::vector<QueryParameter> params2 = {id_param, name_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params2, false, 2).ok());
+  EXPECT_EQ(params2[0].parameter_value.value, "103");
+  EXPECT_EQ(params2[1].parameter_value.value, "Charlie");
+}
+
+TEST(ConstructPositionalQueryParams, ParameterArrayRowWise) {
+  struct RowData {
+    SQLBIGINT id;
+    SQLLEN id_ind;
+    char name[16];
+    SQLLEN name_ind;
+  };
+
+  DescriptorHandle apd(DescriptorType::kAPD, SQL_DESC_ALLOC_AUTO);
+  DescriptorHandle ipd(DescriptorType::kIPD, SQL_DESC_ALLOC_AUTO);
+  apd.GetHeaderRecord().bind_type = sizeof(RowData);
+
+  std::vector<RowData> rows = {
+      {201, sizeof(SQLBIGINT), "Dave", SQL_NTS},
+      {202, sizeof(SQLBIGINT), "Eve", SQL_NTS},
+  };
+
+  PopulateDescriptors(apd, ipd, 1, SQL_C_SBIGINT, SQL_BIGINT, &rows[0].id,
+                      sizeof(SQLBIGINT), &rows[0].id_ind);
+  PopulateDescriptors(apd, ipd, 2, SQL_C_CHAR, SQL_VARCHAR, rows[0].name, 16,
+                      &rows[0].name_ind);
+
+  QueryParameter id_param;
+  id_param.parameter_type.type = "INT64";
+  QueryParameter name_param;
+  name_param.parameter_type.type = "STRING";
+
+  // Test row 0
+  std::vector<QueryParameter> params0 = {id_param, name_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params0, false, 0).ok());
+  EXPECT_EQ(params0[0].parameter_value.value, "201");
+  EXPECT_EQ(params0[1].parameter_value.value, "Dave");
+
+  // Test row 1
+  std::vector<QueryParameter> params1 = {id_param, name_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params1, false, 1).ok());
+  EXPECT_EQ(params1[0].parameter_value.value, "202");
+  EXPECT_EQ(params1[1].parameter_value.value, "Eve");
+}
+
+TEST(ConstructPositionalQueryParams, ParameterArrayNullData) {
+  DescriptorHandle apd(DescriptorType::kAPD, SQL_DESC_ALLOC_AUTO);
+  DescriptorHandle ipd(DescriptorType::kIPD, SQL_DESC_ALLOC_AUTO);
+
+  std::vector<SQLBIGINT> ids = {301, 302};
+  std::vector<SQLLEN> id_inds = {sizeof(SQLBIGINT), SQL_NULL_DATA};
+
+  PopulateDescriptors(apd, ipd, 1, SQL_C_SBIGINT, SQL_BIGINT, ids.data(),
+                      sizeof(SQLBIGINT), id_inds.data());
+
+  QueryParameter id_param;
+  id_param.parameter_type.type = "INT64";
+
+  // Row 0 has value
+  std::vector<QueryParameter> params0 = {id_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params0, false, 0).ok());
+  EXPECT_EQ(params0[0].parameter_value.value, "301");
+
+  // Row 1 is null
+  std::vector<QueryParameter> params1 = {id_param};
+  EXPECT_TRUE(ConstructPositionalQueryParams(apd, ipd, params1, false, 1).ok());
+  EXPECT_EQ(params1[0].parameter_value.value, "");
+}
+
 TEST(ConstructPositionalQueryParams, DescRecNotExists) {
   DescriptorHandle apd(DescriptorType::kAPD, SQL_DESC_ALLOC_AUTO);
   DescriptorHandle ipd(DescriptorType::kIPD, SQL_DESC_ALLOC_AUTO);

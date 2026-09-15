@@ -29,7 +29,7 @@ odbc_internal::StatusRecord ConstructPositionalQueryParams(
     DescriptorHandle& apd, DescriptorHandle& ipd,
     std::vector<::google::cloud::bigquery_v2_minimal_internal::QueryParameter>&
         basic_query_params,
-    bool is_data_buff_req = false);
+    bool is_data_buff_req = false, int paramset_index = 0);
 
 /*
  * @brief Executes a script (SQL query) using the given statement and connection

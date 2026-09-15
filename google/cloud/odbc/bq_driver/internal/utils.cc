@@ -197,8 +197,20 @@ size_t NormalizeBufferSize(int size, size_t max_size) {
 size_t BufferSizeForType(SQLSMALLINT type, size_t requested) {
   size_t minimum_size = 1;
   switch (type) {
+    case SQL_C_BIT:
+    case SQL_C_TINYINT:
+    case SQL_C_STINYINT:
+    case SQL_C_UTINYINT:
+      minimum_size = sizeof(SQLCHAR);
+      break;
+    case SQL_C_SHORT:
+    case SQL_C_SSHORT:
+    case SQL_C_USHORT:
+      minimum_size = sizeof(SQLSMALLINT);
+      break;
     case SQL_C_LONG:
     case SQL_C_SLONG:
+    case SQL_C_ULONG:
       minimum_size = sizeof(SQLINTEGER);
       break;
     case SQL_C_DOUBLE:
