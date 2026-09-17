@@ -2377,7 +2377,6 @@ TEST(CatalogTest, SQLStatisticsW_ValidTable) {
   table.DropWithPrepare(conn);
   EXPECT_EQ(Disconnect(conn), SQL_SUCCESS);
 }
-#endif  // BQ_DRIVER_INTEGRATION_TESTS
 
 // NOTE: We do not call CreateTableDirect() in the SQLSpecialColumns tests
 // below because doing so frequently exceeds BigQuery's rate limits for table
