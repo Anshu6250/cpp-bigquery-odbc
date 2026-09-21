@@ -449,8 +449,8 @@ void DriverForm::InitControls() {
   SetWindowSubclass(GetDlgItem(m_hwnd, kIdcDSNEdit), InputSubclassProc, 0, 0);
 
   HWND h_description_header =
-      CreateLabel(m_hwnd, "Description:", kAxisX, kAxisY + 28, kLabelWidth - 50,
-                  kLabelHeight, WS_VISIBLE | SS_LEFT);
+      CreateLabel(m_hwnd, "Description xyz:", kAxisX, kAxisY + 28,
+                  kLabelWidth - 50, kLabelHeight, WS_VISIBLE | SS_LEFT);
   SendMessage(h_description_header, WM_SETFONT, (WPARAM)h_font, TRUE);
   HWND h_description_edit =
       CreateEditBox(m_hwnd, kAxisX + 170, kAxisY + 28, kEditComboBoxWidth,
