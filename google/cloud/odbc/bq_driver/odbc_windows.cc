@@ -168,6 +168,8 @@ bool ConfigDSNInternal(HWND hwnd_parent, WORD f_request, LPCSTR lpsz_driver,
       GetValueOrDefault(section, private_service_connect_uris_key);
   std::string enable_gcd = GetValueOrDefault(section, enable_gcd_key);
   std::string universe_domain = GetValueOrDefault(section, universe_domain_key);
+  std::string maximum_bytes_billed =
+      GetValueOrDefault(section, maximum_bytes_billed_key);
 
   DriverForm form;
   AdvanceOptions advance_form;
@@ -213,6 +215,7 @@ bool ConfigDSNInternal(HWND hwnd_parent, WORD f_request, LPCSTR lpsz_driver,
         {private_service_connect_uris_key, private_service_connect_uris},
         {enable_gcd_key, enable_gcd},
         {universe_domain_key, universe_domain},
+        {maximum_bytes_billed_key, maximum_bytes_billed},
     };
   };
   auto CreateSectionFromLogForm = [&]() -> Section {
@@ -271,6 +274,7 @@ bool ConfigDSNInternal(HWND hwnd_parent, WORD f_request, LPCSTR lpsz_driver,
     private_service_connect_uris = advance_form.GetPrivateServiceConnectUris();
     enable_gcd = advance_form.GetEnableGcd();
     universe_domain = advance_form.GetUniverseDomain();
+    maximum_bytes_billed = advance_form.GetMaximumBytesBilled();
     proxy_check = proxy_form.GetProxyCheck();
     proxy_host = proxy_form.GetProxyHost();
     proxy_port = proxy_form.GetProxyPort();

@@ -236,6 +236,7 @@ static Section BuildTestConnectionAttributes(
       adv_form.GetPrivateServiceConnectUris();
   attributes_map["EnableGCD"] = adv_form.GetEnableGcd();
   attributes_map["UniverseDomain"] = adv_form.GetUniverseDomain();
+  attributes_map["MaximumBytesBilled"] = adv_form.GetMaximumBytesBilled();
   return attributes_map;
 }
 

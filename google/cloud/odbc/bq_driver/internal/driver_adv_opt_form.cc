@@ -65,6 +65,7 @@ std::string AdvanceOptions::max_retries_ = std::to_string(kDefaultMaxRetries);
 std::string AdvanceOptions::private_service_connect_uris_;
 std::string AdvanceOptions::enable_gcd_;
 std::string AdvanceOptions::universe_domain_;
+std::string AdvanceOptions::maximum_bytes_billed_;
 
 std::string const kLanguageDialect = "SQLDialect";
 std::string const kLargeResultsDatasetId = "LargeResultsDatasetId";
@@ -88,6 +89,7 @@ std::string const kMaxRetries = "MaxRetries";
 std::string const kPrivateServiceConnectUris = "PrivateServiceConnectUris";
 std::string const kEnableGcd = "EnableGCD";
 std::string const kUniverseDomain = "UniverseDomain";
+std::string const kMaximumBytesBilled = "MaximumBytesBilled";
 
 // Control dimensions and positions
 int const kHeight = 20;
@@ -394,6 +396,23 @@ void AdvanceOptions::CreateAdditionalControls(HFONT h_font) {
   SetWindowLongPtr(
       h_max_retries_edit, GWL_STYLE,
       GetWindowLongPtr(h_max_retries_edit, GWL_STYLE) | ES_RIGHT | ES_NUMBER);
+
+  // maximum bytes billed
+  HWND h_maximum_bytes_billed_label =
+      CreateLabel(adv_hwnd, "Maximum bytes billed (bytes):", kXAxis,
+                  kYAxis + 490, kWidth * 4 + 25, kHeight, WS_VISIBLE | SS_LEFT);
+  SendMessage(h_maximum_bytes_billed_label, WM_SETFONT, (WPARAM)h_font, TRUE);
+  HWND h_maximum_bytes_billed_edit =
+      CreateEditBox(adv_hwnd, kinputComboBoxXAxis, kYAxis + 490, kEditBoxWidth,
+                    kEditBoxHeight, kIdcMaximumBytesBilledEdit);
+  SendMessage(h_maximum_bytes_billed_edit, WM_SETFONT, (WPARAM)h_font, TRUE);
+  SetWindowSubclass(GetDlgItem(adv_hwnd, kIdcMaximumBytesBilledEdit),
+                    InputSubclassProc, 0, 0);
+  SetWindowText(h_maximum_bytes_billed_edit, maximum_bytes_billed_.c_str());
+  SetWindowLongPtr(h_maximum_bytes_billed_edit, GWL_STYLE,
+                   GetWindowLongPtr(h_maximum_bytes_billed_edit, GWL_STYLE) |
+                       ES_RIGHT | ES_NUMBER);
+
   // TODO(b/497725655): Enable UI feature after public release
   // HWND h_variables_checkbox = CreateCheckBox(
   //     adv_hwnd, "Use SQL_WVARCHAR instead of SQL_VARCHAR", kXAxis, kYAxis +
@@ -404,12 +423,12 @@ void AdvanceOptions::CreateAdditionalControls(HFONT h_font) {
   // SetWindowSubclass(GetDlgItem(adv_hwnd, kIdcVariableCheckbox),
   //                   CheckboxSubclassProc, 0, 0);
   HWND h_additional_projects_label =
-      CreateLabel(adv_hwnd, "Additional projects:", kXAxis, kYAxis + 495,
+      CreateLabel(adv_hwnd, "Additional projects:", kXAxis, kYAxis + 515,
                   kWidth * 5, kHeight, WS_VISIBLE | SS_LEFT);
   SendMessage(h_additional_projects_label, WM_SETFONT, (WPARAM)h_font, TRUE);
   HWND h_additional_projects_edit =
-      CreateScrollableEditBox(adv_hwnd, kXAxis, kYAxis + 515, kWidth + 445,
-                              kHeight + 32, kIdcAdditionalProjectsEdit);
+      CreateScrollableEditBox(adv_hwnd, kXAxis, kYAxis + 535, kWidth + 445,
+                              kHeight + 16, kIdcAdditionalProjectsEdit);
   SendMessage(h_additional_projects_edit, WM_SETFONT, (WPARAM)h_font, TRUE);
 
   SetWindowText(h_additional_projects_edit, additional_projects_.c_str());
@@ -422,7 +441,7 @@ void AdvanceOptions::CreateAdditionalControls(HFONT h_font) {
   SendMessage(h_query_properties_label, WM_SETFONT, (WPARAM)h_font, TRUE);
   HWND h_query_properties_edit =
       CreateScrollableEditBox(adv_hwnd, kXAxis, kYAxis + 595, kWidth + 445,
-                              kHeight + 13, kIdcQueryPropertiesEdit);
+                              kHeight + 6, kIdcQueryPropertiesEdit);
   SendMessage(h_query_properties_edit, WM_SETFONT, (WPARAM)h_font, TRUE);
 
   SetWindowText(h_query_properties_edit, query_properties_.c_str());
@@ -633,6 +652,28 @@ LRESULT CALLBACK AdvanceOptions::AdvanceOptProc(HWND hwnd, UINT u_msg,
             return true;
           }
 
+          HWND h_maximum_bytes_billed_edit =
+              GetDlgItem(hwnd, kIdcMaximumBytesBilledEdit);
+          char maximum_bytes_billed_buff[256] = {0};
+          GetWindowText(h_maximum_bytes_billed_edit, maximum_bytes_billed_buff,
+                        sizeof(maximum_bytes_billed_buff));
+          // Empty is a valid state: it means no cap, which is the default.
+          if (maximum_bytes_billed_buff[0] == '\0') {
+            maximum_bytes_billed_.clear();
+          } else {
+            auto parsed = ParseStringToInt64(maximum_bytes_billed_buff);
+            if (!parsed || parsed.GetValue() < 0) {
+              std::string err_msg =
+                  "Invalid maximum bytes billed: Valid values are in range "
+                  "[0," +
+                  std::to_string(INT64_MAX) +
+                  "] or leave it empty for no limit";
+              ShowErrorWindow(hwnd, err_msg);
+              return true;
+            }
+            maximum_bytes_billed_ = maximum_bytes_billed_buff;
+          }
+
           HWND h_additional_projects_edit =
               GetDlgItem(hwnd, kIdcAdditionalProjectsEdit);
           char additional_projects_buffer[1024] = {0};
@@ -777,6 +818,7 @@ LRESULT CALLBACK AdvanceOptions::AdvanceOptProc(HWND hwnd, UINT u_msg,
       }
       break;
     }
+
     case WM_KEYDOWN:  // Capture global key presses
       if (w_param == VK_ESCAPE) {
         if (p_current_window) {
@@ -846,6 +888,7 @@ void AdvanceOptions::SetValues(Section const& attribute_map) {
       GetValueOrDefault(attribute_map, kPrivateServiceConnectUris);
   enable_gcd_ = GetValueOrDefault(attribute_map, kEnableGcd);
   universe_domain_ = GetValueOrDefault(attribute_map, kUniverseDomain);
+  maximum_bytes_billed_ = GetValueOrDefault(attribute_map, kMaximumBytesBilled);
 }
 
 void AdvanceOptions::ResetToDefaults() {
@@ -869,6 +912,8 @@ void AdvanceOptions::ResetToDefaults() {
   private_service_connect_uris_.clear();
   enable_gcd_.clear();
   universe_domain_.clear();
+  // Unset means no cap, which is the shipped default.
+  maximum_bytes_billed_.clear();
 }
 
 void AdvanceOptions::Show(HWND hwnd) {

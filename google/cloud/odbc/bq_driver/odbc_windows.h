@@ -65,6 +65,7 @@ std::string const private_service_connect_uris_key =
     "PrivateServiceConnectUris";
 std::string const enable_gcd_key = "EnableGCD";
 std::string const universe_domain_key = "UniverseDomain";
+std::string const maximum_bytes_billed_key = "MaximumBytesBilled";
 
 // Default values for configuration keys
 std::string const kDefaultDsnValue = "Default DSN";
