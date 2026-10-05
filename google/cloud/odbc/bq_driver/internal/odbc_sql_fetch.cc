@@ -103,30 +103,21 @@ StatusRecord WriteToApplicationBuffer(DSValue const& ds_val,
   return {SQLStates::k_HYC00(), "Data type not supported"};
 }
 
-StatusRecord WriteRowset(ResultSet const& result_set, int const rowset_size,
-                         DescriptorHandle& ard, DescriptorHandle& ird) {
-  if (rowset_size <= 0) {
-    LOG(ERROR) << "WriteRowset:: rowset_size should not be <= 0";
-    StatusRecord status_record = {SQLStates::k_HY000(),
-                                  "rowset_size should not be <= 0"};
-    return status_record;
-  }
-  int cursor = result_set.cursor;
-  int row_counter = 0;
-  SQLUSMALLINT* row_status_ptr = ird.GetHeaderRecord().array_status_ptr;
+struct BoundColInfo {
+  int col_index;
+  BQDataType bq_data_type;
+  DescriptorRecord* col_desc;
+  SQLLEN elem_size;
+  SQLLEN elem_size_ind;
+};
 
-  struct BoundColInfo {
-    int col_index;
-    BQDataType bq_data_type;
-    DescriptorRecord* col_desc;
-    SQLLEN elem_size;
-    SQLLEN elem_size_ind;
-  };
+std::vector<BoundColInfo> GetBoundColumns(RowSchema const& row_schema,
+                                          DescriptorHandle& ard) {
   std::vector<BoundColInfo> bound_cols;
-  bound_cols.reserve(result_set.row_schema.size());
+  bound_cols.reserve(row_schema.size());
 
   SQLINTEGER bind_type = ard.GetHeaderRecord().bind_type;
-  for (ColumnSchema const& col_schema : result_set.row_schema) {
+  for (ColumnSchema const& col_schema : row_schema) {
     int col_index = col_schema.col_index;
     if (ard.HasDescriptorRecord(col_index + 1)) {
       DescriptorRecord& col_desc = ard.GetDescriptorRecord(col_index + 1);
@@ -146,6 +137,23 @@ StatusRecord WriteRowset(ResultSet const& result_set, int const rowset_size,
           {col_index, bq_data_type, &col_desc, elem_size, elem_size_ind});
     }
   }
+  return bound_cols;
+}
+
+StatusRecord WriteRowset(ResultSet const& result_set, int const rowset_size,
+                         DescriptorHandle& ard, DescriptorHandle& ird) {
+  if (rowset_size <= 0) {
+    LOG(ERROR) << "WriteRowset:: rowset_size should not be <= 0";
+    StatusRecord status_record = {SQLStates::k_HY000(),
+                                  "rowset_size should not be <= 0"};
+    return status_record;
+  }
+  int cursor = result_set.cursor;
+  int row_counter = 0;
+  SQLUSMALLINT* row_status_ptr = ird.GetHeaderRecord().array_status_ptr;
+
+  std::vector<BoundColInfo> bound_cols =
+      GetBoundColumns(result_set.row_schema, ard);
 
   SQLLEN* bind_offset_ptr = ard.GetHeaderRecord().bind_offset_ptr;
   SQLLEN bind_offset = 0;
