@@ -17,6 +17,15 @@
 #include "google/cloud/odbc/testing/odbc_utils/descriptor.h"
 #include "absl/strings/match.h"
 #include <gmock/gmock.h>
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdint>
+#include <iostream>
+#include <optional>
+#include <sstream>
+#include <string>
+#include <thread>
 using ::testing::Contains;
 using ::testing::HasSubstr;
 
@@ -4795,4 +4804,338 @@ TEST(StatementTest, ScriptQueryWithSelect) {
   EXPECT_EQ(SQLFetch(conn->hstmt), SQL_NO_DATA);
   EXPECT_EQ(Disconnect(conn), SQL_SUCCESS);
 }
+
+// =============================================================================
+// Replication of "idle gRPC connection killed by an intermediary" failures.
+//
+// Customers running BI tools (e.g. PowerBI Desktop) behind corporate proxies,
+// firewalls or load balancers intermittently get
+//   [HY000] ... Storage API Error: { code: UNKNOWN, message: Stream removed }
+//   RST_STREAM with code 2 (internal error)
+// (b/499198162, b/327025976). The intermediary drops TCP connections that
+// carry no bytes for N seconds. A Storage Read API `ReadRows` call is a
+// long-lived gRPC stream and BI tools regularly pause between SQLFetch calls
+// (rendering, transformations, the user thinking), so the tunnel goes quiet,
+// the intermediary tears it down and the next read on the stream fails.
+//
+// The tests below send *all* driver traffic through a local HTTP CONNECT proxy
+// that kills idle tunnels - tools/idle_connect_proxy/idle_connect_proxy.py -
+// using the driver's own ProxyHost/ProxyPort DSN keys. They are skipped unless
+// BQ_ODBC_IDLE_PROXY=host:port is set:
+//
+//   python3 tools/idle_connect_proxy/idle_connect_proxy.py --port 8888
+//   BQ_ODBC_IDLE_PROXY=127.0.0.1:8888 ./all_tests --gtest_filter='*IdleProxy*'
+//
+// Optional knobs:
+//   BQ_ODBC_IDLE_PROXY_PAUSE_SECONDS  idle pause, must exceed the proxy's
+//                                     --idle-timeout (default 30)
+//   BQ_ODBC_IDLE_PROXY_ROWS           rows in the result set, ~1 KiB each so
+//                                     that it is much larger than what gRPC
+//                                     buffers on the client (default 60000)
+//   BQ_ODBC_IDLE_PROXY_EXPECT         report  - print what happened (default)
+//                                     error   - fail unless the customer
+//                                               visible error reproduced
+//                                     success - fail unless the fetch
+//                                               completed (post-fix mode)
+// =============================================================================
+namespace {
+
+struct IdleProxyConfig {
+  std::string proxy_host;
+  std::string proxy_port;
+  std::chrono::seconds pause{30};
+  std::int64_t rows = 60000;
+  std::string expect = "report";
+};
+
+std::optional<IdleProxyConfig> GetIdleProxyConfig() {
+  auto const proxy = GetEnv("BQ_ODBC_IDLE_PROXY");
+  if (!proxy.has_value() || proxy->empty()) return std::nullopt;
+  IdleProxyConfig config;
+  auto const colon = proxy->rfind(':');
+  config.proxy_host = proxy->substr(0, colon);
+  config.proxy_port =
+      colon == std::string::npos ? "8888" : proxy->substr(colon + 1);
+  config.pause = std::chrono::seconds(
+      std::stoi(GetEnv("BQ_ODBC_IDLE_PROXY_PAUSE_SECONDS").value_or("30")));
+  config.rows = std::stoll(GetEnv("BQ_ODBC_IDLE_PROXY_ROWS").value_or("60000"));
+  config.expect = GetEnv("BQ_ODBC_IDLE_PROXY_EXPECT").value_or("report");
+  return config;
+}
+
+// Sends REST *and* gRPC traffic through the proxy and forces the Storage Read
+// API (HTAPI) path, like the other HTAPI tests in this file.
+std::string IdleProxyConnectionString(IdleProxyConfig const& config) {
+  return kDefaultConnectionString +
+         ";AllowHtapiForLargeResults=1;HTAPI_ActivationThreshold=0;"
+         "ProxyHost=" +
+         config.proxy_host + ";ProxyPort=" + config.proxy_port;
+}
+
+// ~1 KiB per row: `rows` rows are far more than gRPC's HTTP/2 receive window,
+// so the server is still streaming when the application pauses.
+std::string IdleProxyQuery(std::int64_t rows) {
+  return "SELECT id, REPEAT('x', 1000) AS payload "
+         "FROM UNNEST(GENERATE_ARRAY(1, " +
+         std::to_string(rows) + ")) AS id ORDER BY id";
+}
+
+struct IdleProxyDiagnostic {
+  std::string sql_state;
+  SQLINTEGER native_error = 0;
+  std::string message;
+};
+
+IdleProxyDiagnostic GetIdleProxyDiagnostic(SQLHANDLE handle,
+                                           SQLSMALLINT handle_type) {
+  IdleProxyDiagnostic diag;
+  SQLCHAR sql_state[6] = {0};
+  SQLCHAR message[4096] = {0};
+  SQLSMALLINT message_len = 0;
+  SQLRETURN const rc = SQLGetDiagRec(
+      handle_type, handle, 1, sql_state, &diag.native_error, message,
+      static_cast<SQLSMALLINT>(sizeof(message)), &message_len);
+  if (SQL_SUCCEEDED(rc)) {
+    diag.sql_state = reinterpret_cast<char*>(sql_state);
+    diag.message = reinterpret_cast<char*>(message);
+  }
+  return diag;
+}
+
+// What gRPC / google-cloud-cpp / the Simba driver report when an intermediary
+// drops the connection or the HTTP/2 stream.
+bool IdleProxyLooksLikeDroppedConnection(std::string message) {
+  static char const* const kMarkers[] = {"stream removed",
+                                         "rst_stream",
+                                         "socket closed",
+                                         "connection reset",
+                                         "reset by peer",
+                                         "end of tcp stream",
+                                         "broken pipe",
+                                         "forcibly closed",
+                                         "ping timeout",
+                                         "keepalive",
+                                         "goaway",
+                                         "unavailable",
+                                         "transport closed",
+                                         "endpoint read failed",
+                                         "storage api error",
+                                         "createreadsession",
+                                         "readrows",
+                                         "timed out",
+                                         "eof"};
+  std::transform(
+      message.begin(), message.end(), message.begin(),
+      [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  for (auto const* marker : kMarkers) {
+    if (message.find(marker) != std::string::npos) return true;
+  }
+  return false;
+}
+
+struct IdleProxyFetchOutcome {
+  SQLRETURN last_rc = SQL_SUCCESS;  // SQL_NO_DATA once the stream ended.
+  std::int64_t rows = 0;
+  std::int64_t expected_next_id = 1;
+  bool ids_contiguous = true;
+  std::chrono::milliseconds slowest_fetch{0};
+  std::int64_t slowest_fetch_row = 0;
+  IdleProxyDiagnostic diag;
+};
+
+// Fetches up to `max_rows` rows (all remaining rows if max_rows <= 0). Column 1
+// (`id`) must be bound to `id` by the caller.
+void IdleProxyFetch(std::shared_ptr<ODBCHandles> const& conn,
+                    SQLBIGINT const& id, std::int64_t max_rows,
+                    IdleProxyFetchOutcome& outcome) {
+  for (std::int64_t fetched = 0; max_rows <= 0 || fetched < max_rows;
+       ++fetched) {
+    auto const start = std::chrono::steady_clock::now();
+    SQLRETURN const rc = SQLFetch(conn->hstmt);
+    auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start);
+    if (!SQL_SUCCEEDED(rc)) {
+      outcome.last_rc = rc;
+      if (rc != SQL_NO_DATA) {
+        outcome.diag = GetIdleProxyDiagnostic(conn->hstmt, SQL_HANDLE_STMT);
+      }
+      return;
+    }
+    ++outcome.rows;
+    if (elapsed > outcome.slowest_fetch) {
+      outcome.slowest_fetch = elapsed;
+      outcome.slowest_fetch_row = outcome.rows;
+    }
+    if (id != outcome.expected_next_id) outcome.ids_contiguous = false;
+    outcome.expected_next_id = id + 1;
+  }
+  outcome.last_rc = SQL_SUCCESS;
+}
+
+std::string IdleProxyDescribe(IdleProxyFetchOutcome const& outcome) {
+  std::ostringstream os;
+  os << "rows=" << outcome.rows << " last_rc=" << outcome.last_rc
+     << " ids_contiguous=" << (outcome.ids_contiguous ? "yes" : "NO")
+     << " slowest_fetch=" << outcome.slowest_fetch.count() << "ms (row "
+     << outcome.slowest_fetch_row << ")";
+  if (!outcome.diag.message.empty()) {
+    os << " SQLSTATE=" << outcome.diag.sql_state
+       << " native=" << outcome.diag.native_error << " message=\""
+       << outcome.diag.message << "\"";
+  }
+  return os.str();
+}
+
+// Checks the outcome of a fetch against BQ_ODBC_IDLE_PROXY_EXPECT and prints a
+// verdict. Two invariants hold in every mode: no silently truncated result set
+// and no duplicated/skipped rows after a transparent stream resume.
+void IdleProxyCheck(IdleProxyConfig const& config,
+                    IdleProxyFetchOutcome const& outcome,
+                    std::int64_t expected_rows, std::string const& phase) {
+  std::string const description = IdleProxyDescribe(outcome);
+  bool const reproduced =
+      outcome.last_rc == SQL_ERROR && outcome.diag.sql_state == "HY000" &&
+      IdleProxyLooksLikeDroppedConnection(outcome.diag.message);
+  bool const completed =
+      outcome.last_rc == SQL_NO_DATA && outcome.rows == expected_rows;
+  char const* verdict =
+      reproduced ? "customer-visible dropped-connection error REPRODUCED"
+      : completed
+          ? "fetch completed - the driver reconnected/resumed transparently "
+            "or the proxy never killed the tunnel (check the proxy log)"
+          : "unexpected outcome";
+  std::cout << "[IdleProxy] " << phase << ": " << description
+            << "\n[IdleProxy] verdict: " << verdict << std::endl;
+  std::string key = "idle_proxy_" + phase;
+  std::replace_if(
+      key.begin(), key.end(),
+      [](unsigned char c) { return std::isalnum(c) == 0; }, '_');
+  ::testing::Test::RecordProperty(key, description + " => " + verdict);
+
+  EXPECT_TRUE(outcome.ids_contiguous)
+      << phase << ": rows were duplicated or skipped: " << description;
+  if (outcome.last_rc == SQL_NO_DATA) {
+    EXPECT_EQ(outcome.rows, expected_rows)
+        << phase << ": result set silently truncated: " << description;
+  }
+  if (config.expect == "error") {
+    EXPECT_TRUE(reproduced)
+        << phase
+        << ": expected the dropped-connection error, got: " << description
+        << (completed
+                ? "\nThe driver recovered on its own: google-cloud-cpp "
+                  "resumes ReadRows from the last offset. Confirm in the "
+                  "proxy log that the tunnel was killed, then try --mode "
+                  "stale-reset or blackhole and/or the *BetweenQueries test."
+                : "");
+  } else if (config.expect == "success") {
+    EXPECT_TRUE(completed) << phase << ": expected the fetch to complete, got: "
+                           << description;
+  }
+}
+
+}  // namespace
+
+// Scenario 1 (the customer's symptom): the application stops calling SQLFetch
+// while a ReadRows stream is open, the intermediary kills the idle connection
+// and the fetch is resumed afterwards.
+TEST(StatementTest, ReadAPI_IdleProxy_StreamDroppedMidFetch) {
+  auto const config = GetIdleProxyConfig();
+  if (!config) {
+    GTEST_SKIP() << "Set BQ_ODBC_IDLE_PROXY=host:port and start "
+                    "tools/idle_connect_proxy/idle_connect_proxy.py";
+  }
+
+  auto conn = std::make_shared<ODBCHandles>();
+  ASSERT_EQ(Connect(IdleProxyConnectionString(*config), conn), SQL_SUCCESS);
+
+  std::string const query = IdleProxyQuery(config->rows);
+  SQLRETURN rc = SQLExecDirect(conn->hstmt, (SQLCHAR*)query.c_str(), SQL_NTS);
+  CheckError(rc, "SQLExecDirect", conn);
+
+  SQLBIGINT id = 0;
+  SQLLEN id_ind = 0;
+  rc = SQLBindCol(conn->hstmt, 1, SQL_C_SBIGINT, &id, sizeof(id), &id_ind);
+  CheckError(rc, "SQLBindCol", conn);
+
+  // Consume a handful of rows: the ReadRows stream is open and the server
+  // still has (almost) the whole result set to send.
+  std::int64_t const rows_before_pause =
+      std::min<std::int64_t>(100, config->rows / 2);
+  IdleProxyFetchOutcome outcome;
+  IdleProxyFetch(conn, id, rows_before_pause, outcome);
+  ASSERT_EQ(outcome.last_rc, SQL_SUCCESS) << IdleProxyDescribe(outcome);
+  ASSERT_EQ(outcome.rows, rows_before_pause);
+
+  // Stall like a BI tool: no SQLFetch, hence no bytes on the wire. The proxy
+  // kills the tunnel once its --idle-timeout elapses.
+  std::cout << "[IdleProxy] stream open after " << outcome.rows
+            << " rows, pausing for " << config->pause.count() << "s"
+            << std::endl;
+  std::this_thread::sleep_for(config->pause);
+
+  // Rows of the Arrow batch cached by the driver are served from memory; the
+  // first batch boundary needs the (now dead) connection.
+  outcome.slowest_fetch = std::chrono::milliseconds(0);
+  outcome.slowest_fetch_row = 0;
+  IdleProxyFetch(conn, id, /*max_rows=*/0, outcome);
+  IdleProxyCheck(*config, outcome, config->rows, "fetch after the idle pause");
+
+  SQLFreeStmt(conn->hstmt, SQL_CLOSE);
+  EXPECT_EQ(Disconnect(conn), SQL_SUCCESS);
+}
+
+// Scenario 2 (how this driver is most likely to fail): the connection sits
+// idle *between* two Storage Read API queries. ReadRows is resumed by
+// google-cloud-cpp on transient errors, but CreateReadSession is not
+// idempotent and is not retried, so a dead-but-not-yet-detected connection
+// (proxy modes stale-reset / blackhole) surfaces as an error on the second
+// query. This is also the "report refresh after a coffee break" pattern.
+TEST(StatementTest, ReadAPI_IdleProxy_ConnectionDroppedBetweenQueries) {
+  auto const config = GetIdleProxyConfig();
+  if (!config) {
+    GTEST_SKIP() << "Set BQ_ODBC_IDLE_PROXY=host:port and start "
+                    "tools/idle_connect_proxy/idle_connect_proxy.py";
+  }
+  // The idle gap is between queries. We use at least 25000 rows (~25 MB) so
+  // that it exceeds BigQuery's 10 MB REST response limit, forcing the driver
+  // to activate the Storage Read API (HTAPI).
+  std::int64_t const rows = std::min<std::int64_t>(config->rows, 25000);
+  std::string const query = IdleProxyQuery(rows);
+
+  auto conn = std::make_shared<ODBCHandles>();
+  ASSERT_EQ(Connect(IdleProxyConnectionString(*config), conn), SQL_SUCCESS);
+
+  SQLBIGINT id = 0;
+  SQLLEN id_ind = 0;
+  auto const run_query = [&]() {
+    IdleProxyFetchOutcome outcome;
+    SQLRETURN rc = SQLExecDirect(conn->hstmt, (SQLCHAR*)query.c_str(), SQL_NTS);
+    if (!SQL_SUCCEEDED(rc)) {
+      outcome.last_rc = rc;
+      outcome.diag = GetIdleProxyDiagnostic(conn->hstmt, SQL_HANDLE_STMT);
+      return outcome;
+    }
+    rc = SQLBindCol(conn->hstmt, 1, SQL_C_SBIGINT, &id, sizeof(id), &id_ind);
+    CheckError(rc, "SQLBindCol", conn);
+    IdleProxyFetch(conn, id, /*max_rows=*/0, outcome);
+    SQLFreeStmt(conn->hstmt, SQL_CLOSE);
+    return outcome;
+  };
+
+  auto const first = run_query();
+  ASSERT_EQ(first.last_rc, SQL_NO_DATA)
+      << "the first query must succeed: " << IdleProxyDescribe(first);
+  ASSERT_EQ(first.rows, rows) << IdleProxyDescribe(first);
+  std::cout << "[IdleProxy] first query done (" << first.rows
+            << " rows), pausing for " << config->pause.count()
+            << "s with the connection idle" << std::endl;
+  std::this_thread::sleep_for(config->pause);
+
+  auto const second = run_query();
+  IdleProxyCheck(*config, second, rows, "second query after the idle pause");
+
+  EXPECT_EQ(Disconnect(conn), SQL_SUCCESS);
+}
+
 }  // namespace google::cloud::odbc_tests
