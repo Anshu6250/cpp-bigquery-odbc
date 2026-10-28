@@ -27,37 +27,28 @@ source module ci/lib/io.sh
 
 WORKSPACE_DIR=$(pwd)
 
-# Export as env variable
 VCPKG_VERSION=$(cat /tmp/vcpkg-version.txt)
 export VCPKG_VERSION
 echo "Using VCPKG_VERSION=$VCPKG_VERSION"
 
-# Vcpkg install and configure
 export VCPKG_ROOT=/vcpkg
 git clone --branch "$VCPKG_VERSION" https://github.com/microsoft/vcpkg.git "$VCPKG_ROOT"
 cd "$VCPKG_ROOT"
 git checkout "$VCPKG_VERSION"
-
-# Bootstrap
 ./bootstrap-vcpkg.sh -disableMetrics
 
 cd "$WORKSPACE_DIR"
-# Run unit tests
 mapfile -t args < <(bazel::common_args)
 mapfile -t unit_tests_args < <(unit_tests::bazel_args)
 mapfile -t secrets_bazel < <(secrets::bazel_args)
-
 io::run bazel test "${args[@]}" "${secrets_bazel[@]}" "${unit_tests_args[@]}" --test_tag_filters=unit-tests ...
 
-# Run the integration tests
 mapfile -t cmake_args < <(cmake::common_args)
 
 BUILD_DIR="/opt/odbc-driver"
-# This is the name of DSN set in odbc.ini
 export ODBC_TESTS_DSN="SampleDSNGoogleDriver"
 export CPP_BIGQUERY_ODBC_TEST_TABLE_PREFIX=${TRIGGER_NAME//[-:;.,?]/_}_${BRANCH_NAME//[-:;.,?]/_}
 
-# Check if unixODBC is installed
 if command -v odbcinst &>/dev/null; then
   export UNIXODBC_INSTALLED=true
   echo "unixODBC is installed."
@@ -79,13 +70,13 @@ io::run cmake -B "$BUILD_DIR" \
   -DCLIENT_LIBRARY_INTEGRATION_TESTING=OFF
 io::run cmake --build cmake-out
 
-# Copy the roots.pem file to the .so directory to run test cases.
 cp /opt/odbc-driver/roots.pem "cmake-out/google/cloud/odbc/roots.pem"
 
-# Start idle connect proxy for Storage API keepalive integration tests
 PROXY_PORT=8888
 PROXY_PID=""
 PROXY_LOG="/tmp/idle_connect_proxy.log"
+PROXY_KILLS="/tmp/idle_connect_proxy.kills"
+PROXY_STATS="/tmp/idle_connect_proxy.stats"
 
 cleanup_proxy() {
   if [[ -n "${PROXY_PID}" ]] && kill -0 "${PROXY_PID}" 2>/dev/null; then
@@ -107,14 +98,34 @@ if [[ -f "${WORKSPACE_DIR}/tools/idle_connect_proxy/idle_connect_proxy.py" ]]; t
     --port "${PROXY_PORT}" \
     --idle-timeout 40 \
     --mode reset \
-    > "${PROXY_LOG}" 2>&1 &
+    --kills-file "${PROXY_KILLS}" \
+    --stats-file "${PROXY_STATS}" \
+    >"${PROXY_LOG}" 2>&1 &
   PROXY_PID=$!
   export BQ_ODBC_IDLE_PROXY="127.0.0.1:${PROXY_PORT}"
   export BQ_ODBC_IDLE_PROXY_PAUSE_SECONDS="45"
   export BQ_ODBC_IDLE_PROXY_EXPECT="success"
+  export BQ_ODBC_IDLE_PROXY_KILLS_FILE="${PROXY_KILLS}"
+  export BQ_ODBC_IDLE_PROXY_STATS_FILE="${PROXY_STATS}"
   echo "Idle connect proxy started with PID ${PROXY_PID} on 127.0.0.1:${PROXY_PORT}"
 fi
 
 mapfile -t ctest_args < <(ctest::common_args)
 echo "Running IdleProxy integration tests..."
 io::run env -C cmake-out ctest "${ctest_args[@]}" -R "IdleProxy"
+
+if [[ -f "${PROXY_LOG}" ]] && grep -q "KILL mode=" "${PROXY_LOG}"; then
+  echo "ERROR: Idle connect proxy killed one or more connections due to idle timeout."
+  echo "gRPC keepalive failed to keep the connection alive!"
+  exit 1
+fi
+
+if [[ -f "${PROXY_LOG}" ]] && grep -q "SERVER_DROP" "${PROXY_LOG}"; then
+  echo "ERROR: Server severed connection during pause (ping flood / too_many_pings rejection)!"
+  exit 1
+fi
+
+if [[ -f "${PROXY_LOG}" ]] && grep -q "PING_FLOOD" "${PROXY_LOG}"; then
+  echo "ERROR: Excessive keepalive ping flood detected in proxy log!"
+  exit 1
+fi
