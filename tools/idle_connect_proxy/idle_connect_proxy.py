@@ -28,6 +28,7 @@ LOG = logging.getLogger("idle-proxy")
 
 ARGS = None
 TUNNELS = set()
+SESSION_HAD_DROP = False
 STATS = {
     "tunnels": 0,
     "kills": 0,
@@ -116,10 +117,12 @@ def write_stats_file():
 
 def kill(tunnel, reason):
     """Applies the configured kill mode to an open tunnel."""
+    global SESSION_HAD_DROP
     if tunnel.state != "open":
         return
     tunnel.kill_reason = reason
     STATS["kills"] += 1
+    SESSION_HAD_DROP = True
     write_stats_file()
     LOG.warning(
         "%s KILL mode=%s: %s | age=%.1fs idle=%.1fs up=%dB down=%dB",
@@ -191,9 +194,13 @@ async def relay(reader, writer, tunnel, direction):
                             tunnel.window_start = now
                             tunnel.window_packets = 0
                         tunnel.window_packets += 1
+                    else:
+                        tunnel.window_start = now
+                        tunnel.window_packets = 0
             else:
                 tunnel.down_bytes += len(data)
-                tunnel.last_down_activity = now
+                if len(data) > 256:
+                    tunnel.last_down_activity = now
                 if (
                     ARGS.kill_after_bytes > 0
                     and tunnel.monitored
@@ -279,12 +286,14 @@ async def handle_client(client_reader, client_writer):
         close_writer(server_writer)
         return
 
+    global SESSION_HAD_DROP
     TUNNELS.add(tunnel)
     STATS["tunnels"] += 1
     if tunnel.monitored:
         STATS["storage_tunnels"] += 1
-        if STATS["server_drops"] > 0 or STATS["kills"] > 0:
+        if SESSION_HAD_DROP:
             STATS["reconnects"] += 1
+            SESSION_HAD_DROP = False
             LOG.warning(
                 "%s RECONNECT: emergency reconnect after connection dropped", tunnel
             )
@@ -311,15 +320,20 @@ async def handle_client(client_reader, client_writer):
         TUNNELS.discard(tunnel)
         close_writer(client_writer)
         close_writer(server_writer)
-        closed_by_server = down in done and tunnel.kill_reason is None
-        if tunnel.monitored and closed_by_server and tunnel.age() < 40.0:
+        closed_by_server = (
+            down in done and up not in done and tunnel.kill_reason is None
+        )
+        if tunnel.monitored and closed_by_server:
             STATS["server_drops"] += 1
+            SESSION_HAD_DROP = True
             write_stats_file()
             LOG.warning(
                 "%s SERVER_DROP: closed by server after %.1fs (ping flood rejection / rate limit)",
                 tunnel,
                 tunnel.age(),
             )
+        if not TUNNELS:
+            SESSION_HAD_DROP = False
         how = (
             f"killed by proxy ({tunnel.kill_reason})"
             if tunnel.kill_reason

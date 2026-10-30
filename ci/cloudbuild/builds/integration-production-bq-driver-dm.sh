@@ -84,4 +84,69 @@ io::run cmake --build cmake-out
 # Copy the roots.pem file to the .so directory to run test cases.
 cp /opt/odbc-driver/roots.pem "cmake-out/google/cloud/odbc/roots.pem"
 mapfile -t ctest_args < <(ctest::common_args)
-io::run env -C cmake-out ctest "${ctest_args[@]}"
+io::run env -C cmake-out ctest "${ctest_args[@]}" -E "IdleProxy"
+
+if [[ "${UNIXODBC_INSTALLED}" == "true" ]]; then
+  PROXY_PORT=8888
+  PROXY_PID=""
+  PROXY_LOG="/tmp/idle_connect_proxy.log"
+  PROXY_KILLS="/tmp/idle_connect_proxy.kills"
+  PROXY_STATS="/tmp/idle_connect_proxy.stats"
+
+  cleanup_proxy() {
+    if [[ -n "${PROXY_PID}" ]] && kill -0 "${PROXY_PID}" 2>/dev/null; then
+      echo "Terminating idle connect proxy..."
+      kill "${PROXY_PID}" 2>/dev/null || true
+      wait "${PROXY_PID}" 2>/dev/null || true
+    fi
+    if [[ -f "${PROXY_LOG}" ]]; then
+      echo "=== Idle Connect Proxy Log Output ==="
+      cat "${PROXY_LOG}" || true
+      echo "=== End Idle Connect Proxy Log Output ==="
+    fi
+    if declare -F show_stats_handler >/dev/null; then
+      show_stats_handler
+    fi
+  }
+  trap cleanup_proxy EXIT
+
+  echo "Starting idle connect proxy on port ${PROXY_PORT}..."
+  python3 "${WORKSPACE_DIR}/tools/idle_connect_proxy/idle_connect_proxy.py" \
+    --port "${PROXY_PORT}" \
+    --idle-timeout 40 \
+    --mode reset \
+    --kills-file "${PROXY_KILLS}" \
+    --stats-file "${PROXY_STATS}" \
+    >"${PROXY_LOG}" 2>&1 &
+  PROXY_PID=$!
+  sleep 1
+  if ! kill -0 "${PROXY_PID}" 2>/dev/null; then
+    echo "ERROR: Idle connect proxy failed to start."
+    exit 1
+  fi
+  export BQ_ODBC_IDLE_PROXY="127.0.0.1:${PROXY_PORT}"
+  export BQ_ODBC_IDLE_PROXY_PAUSE_SECONDS="45"
+  export BQ_ODBC_IDLE_PROXY_EXPECT="success"
+  export BQ_ODBC_IDLE_PROXY_KILLS_FILE="${PROXY_KILLS}"
+  export BQ_ODBC_IDLE_PROXY_STATS_FILE="${PROXY_STATS}"
+  echo "Idle connect proxy started with PID ${PROXY_PID} on 127.0.0.1:${PROXY_PORT}"
+
+  echo "Running IdleProxy integration tests..."
+  io::run env -C cmake-out ctest "${ctest_args[@]}" -j 1 -R "IdleProxy"
+
+  if [[ -f "${PROXY_LOG}" ]] && grep -q "KILL mode=" "${PROXY_LOG}"; then
+    echo "ERROR: Idle connect proxy killed one or more connections due to idle timeout."
+    echo "gRPC keepalive failed to keep the connection alive!"
+    exit 1
+  fi
+
+  if [[ -f "${PROXY_LOG}" ]] && grep -q "SERVER_DROP" "${PROXY_LOG}"; then
+    echo "ERROR: Server severed connection during pause (ping flood / too_many_pings rejection)!"
+    exit 1
+  fi
+
+  if [[ -f "${PROXY_LOG}" ]] && grep -q "PING_FLOOD" "${PROXY_LOG}"; then
+    echo "ERROR: Excessive keepalive ping flood detected in proxy log!"
+    exit 1
+  fi
+fi
