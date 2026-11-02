@@ -19,11 +19,11 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
-#include <bcrypt.h>
-#include <shellapi.h>
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
+#include <bcrypt.h>
+#include <shellapi.h>
 #pragma comment(lib, "Bcrypt.lib")
 #pragma comment(lib, "Shell32.lib")
 #pragma comment(lib, "Ws2_32.lib")

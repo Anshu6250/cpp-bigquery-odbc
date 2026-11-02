@@ -574,7 +574,7 @@ ODBCBQClient::CreateReadSession(
     auto token = GetOAuth2Token();
     if (!token) return token.GetStatusRecord();
     Options call_options = options;
-    call_options.lookup<google::cloud::CustomHeadersOption>().emplace_back(
+    call_options.lookup<google::cloud::CustomHeadersOption>().emplace(
         "authorization", "Bearer " + token->token);
     return ::google::cloud::odbc_bigquery_client_interface::CreateReadSession(
         bigquery_read_client_, read_session_request, call_options);
@@ -592,7 +592,7 @@ ODBCBQClient::GetReadRowsStream(
     auto token = GetOAuth2Token();
     if (token) {
       Options call_options = options;
-      call_options.lookup<google::cloud::CustomHeadersOption>().emplace_back(
+      call_options.lookup<google::cloud::CustomHeadersOption>().emplace(
           "authorization", "Bearer " + token->token);
       return bigquery_read_client_.ReadRows(read_rows_request, call_options);
     }
