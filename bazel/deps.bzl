@@ -85,4 +85,8 @@ def cpp_bigquery_odbc_deps(name = None):
         ],
         sha256 = "8ffe5675b72822789704bca9e045a4a7e1fc047199f1f41d5df1549318563020",
         strip_prefix = "google-cloud-cpp-3.10.0",
+        patch_args = ["-p1"],
+        patches = [
+            "//bazel:google_cloud_cpp_16581_googleapis.patch",
+        ],
     )
