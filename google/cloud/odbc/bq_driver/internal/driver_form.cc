@@ -255,7 +255,9 @@ static Section BuildTestConnectionAttributes(
 StatusRecordOr<std::string> DriverForm::GetCatalogAndDataset(
     std::string const& action, std::string const& key_file_path,
     std::string const& oauth_token, std::string const& catalog_name,
-    std::string const& trusted_certs, bool use_system_trust_store) {
+    std::string const& trusted_certs, bool use_system_trust_store,
+    std::string const& refresh_token, std::string const& client_id,
+    std::string const& client_secret, bool use_default_client_credentials) {
   OauthMechanism oauth_value;
   if (oauth_token == "Service Authentication") {
     oauth_value = OauthMechanism::kServiceAccount;
@@ -269,13 +271,20 @@ StatusRecordOr<std::string> DriverForm::GetCatalogAndDataset(
           "Environment variable GOOGLE_APPLICATION_CREDENTIALS is not set. "
           "Please set it before using Application Default Credentials."};
     }
-  } else {
+  } else if (oauth_token == "External Account Authentication") {
     oauth_value = OauthMechanism::kExternalUser;
+  } else {
+    return StatusRecord{SQLStates::k_HY000(),
+                        "Failed to create BigQuery client."};
   }
 
   ConnProps conn_props;
   conn_props.auth_mechanism = oauth_value;
   conn_props.credentials_file_path = key_file_path;
+  conn_props.refresh_token = refresh_token;
+  conn_props.client_id = client_id;
+  conn_props.client_secret = client_secret;
+  conn_props.use_default_client_credentials = use_default_client_credentials;
   conn_props.ssl_credentials.pem_root_certs =
       !trusted_certs.empty() ? trusted_certs : GetDefaultPemFile();
   conn_props.ssl_credentials.use_system_trust_store = use_system_trust_store;
@@ -291,6 +300,13 @@ StatusRecordOr<std::string> DriverForm::GetCatalogAndDataset(
   conn_props.gcd.enable_gcd =
       (adv_form.GetEnableGcd() == "1" || adv_form.GetEnableGcd() == "true");
   conn_props.gcd.universe_domain = adv_form.GetUniverseDomain();
+  conn_props.byoid_aud_url = GetValueOrDefault(
+      last_saved_values_, "BYOID_AudienceUri",
+      GetValueOrDefault(last_saved_values_, "BYOID_AudienceUrl"));
+  conn_props.byoid_pool_user_project =
+      GetValueOrDefault(last_saved_values_, "BYOID_PoolUserProject");
+  conn_props.universe_cloud_web_domain =
+      GetValueOrDefault(last_saved_values_, "UniverseCloudWebDomain");
 
   SQLULEN metadata_id = 0;
   auto bq_client_ptr = ODBCBQClient::CreateBQClient(conn_props);
@@ -921,12 +937,17 @@ void EvaluateFields(HWND hwnd) {
 void PopulateDropdown(HWND h_dataset_box, std::string text,
                       std::string key_file, std::string conn_props,
                       std::string catalog, std::string trusted_certs = "",
-                      bool use_system_trust_store = false) {
+                      bool use_system_trust_store = false,
+                      std::string const& refresh_token = "",
+                      std::string const& client_id = "",
+                      std::string const& client_secret = "",
+                      bool use_default_client_credentials = true) {
   SendMessage(h_dataset_box, CB_RESETCONTENT, 0, 0);
 
-  StatusRecordOr<std::string> status_record =
-      DriverForm::GetCatalogAndDataset(text, key_file, conn_props, catalog,
-                                       trusted_certs, use_system_trust_store);
+  StatusRecordOr<std::string> status_record = DriverForm::GetCatalogAndDataset(
+      text, key_file, conn_props, catalog, trusted_certs,
+      use_system_trust_store, refresh_token, client_id, client_secret,
+      use_default_client_credentials);
 
   if (!status_record.Ok()) {
     MessageBox(h_dataset_box, status_record.GetStatusRecord().message.c_str(),
@@ -982,16 +1003,18 @@ StatusRecord HandleDropdown(HWND hwnd, int control_id, char const* field_type,
   bool has_catalog =
       (strcmp(field_type, "Catalog") == 0 || catalog_buffer[0] != '\0');
 
+  char refresh_token_buffer[4096] = {};
+  char client_id_buffer[256] = {};
+  char client_secret_buffer[256] = {};
+  bool use_default_creds =
+      (IsDlgButtonChecked(hwnd, kIdcUseDefaultCredsCheckbox) == BST_CHECKED);
   if (is_user_auth) {
-    char refresh_token_buffer[256] = {};
     RetrieveFieldText(hwnd, kIdcRefreshTokenEdit, refresh_token_buffer,
                       sizeof(refresh_token_buffer));
     if (refresh_token_buffer[0] == '\0') {
       return StatusRecord{SQLStates::k_HY000(), "Refresh Token not entered"};
     }
-    if (IsDlgButtonChecked(hwnd, kIdcUseDefaultCredsCheckbox) != BST_CHECKED) {
-      char client_id_buffer[256] = {};
-      char client_secret_buffer[256] = {};
+    if (!use_default_creds) {
       RetrieveFieldText(hwnd, kIdcClientIdEdit, client_id_buffer,
                         sizeof(client_id_buffer));
       RetrieveFieldText(hwnd, kIdcClientSecretEdit, client_secret_buffer,
@@ -1012,7 +1035,8 @@ StatusRecord HandleDropdown(HWND hwnd, int control_id, char const* field_type,
         (IsDlgButtonChecked(hwnd, kIdcSystemTrustStoreCheckbox) == BST_CHECKED);
     PopulateDropdown(h_control, field_type, key_to_use, auth_buffer,
                      catalog_buffer, trusted_cert_buffer,
-                     use_system_trust_store);
+                     use_system_trust_store, refresh_token_buffer,
+                     client_id_buffer, client_secret_buffer, use_default_creds);
     return StatusRecord::Ok();
   }
 
@@ -1199,6 +1223,87 @@ LRESULT CALLBACK DriverForm::WindowProc(HWND hwnd, UINT u_msg, WPARAM w_param,
           EvaluateFields(hwnd);
           break;
         }
+        case kIdcSignInButton: {
+          bool use_default_creds =
+              (IsDlgButtonChecked(hwnd, kIdcUseDefaultCredsCheckbox) ==
+               BST_CHECKED);
+          char client_id_buffer[256] = {0};
+          char client_secret_buffer[256] = {0};
+          RetrieveFieldText(hwnd, kIdcClientIdEdit, client_id_buffer,
+                            sizeof(client_id_buffer));
+          RetrieveFieldText(hwnd, kIdcClientSecretEdit, client_secret_buffer,
+                            sizeof(client_secret_buffer));
+          if (!use_default_creds && (client_id_buffer[0] == '\0' ||
+                                     client_secret_buffer[0] == '\0')) {
+            MessageBox(hwnd, "Client ID or Client Secret not entered", "Error",
+                       MB_OK | MB_ICONERROR);
+            break;
+          }
+
+          char trusted_cert_buffer[256] = {0};
+          RetrieveFieldText(hwnd, kIdcTrustedCertEdit, trusted_cert_buffer,
+                            sizeof(trusted_cert_buffer));
+          bool use_system_trust_store =
+              (IsDlgButtonChecked(hwnd, kIdcSystemTrustStoreCheckbox) ==
+               BST_CHECKED);
+
+          ConnProps conn_props;
+          conn_props.auth_mechanism = OauthMechanism::kUserAccount;
+          conn_props.use_default_client_credentials = use_default_creds;
+          conn_props.client_id = client_id_buffer;
+          conn_props.client_secret = client_secret_buffer;
+          conn_props.ssl_credentials.pem_root_certs =
+              (trusted_cert_buffer[0] != '\0')
+                  ? std::string(trusted_cert_buffer)
+                  : GetDefaultPemFile();
+          conn_props.ssl_credentials.use_system_trust_store =
+              use_system_trust_store;
+
+          ProxyOptions proxy_form;
+          conn_props.proxy_options.hostname = proxy_form.GetProxyHost();
+          conn_props.proxy_options.port = proxy_form.GetProxyPort();
+          conn_props.proxy_options.username = proxy_form.GetProxyUsername();
+          conn_props.proxy_options.password = proxy_form.GetProxyPass();
+
+          AdvanceOptions adv_form;
+          conn_props.gcd.enable_gcd = (adv_form.GetEnableGcd() == "1" ||
+                                       adv_form.GetEnableGcd() == "true");
+          conn_props.gcd.universe_domain = adv_form.GetUniverseDomain();
+          conn_props.byoid_aud_url = GetValueOrDefault(
+              last_saved_values_, "BYOID_AudienceUri",
+              GetValueOrDefault(last_saved_values_, "BYOID_AudienceUrl"));
+          conn_props.universe_cloud_web_domain =
+              GetValueOrDefault(last_saved_values_, "UniverseCloudWebDomain");
+
+          if (use_system_trust_store) {
+            auto pem_or =
+                odbc_bigquery_client_interface::ExportWindowsSystemCertsToPem();
+            if (!pem_or) {
+              MessageBox(hwnd, pem_or.GetStatusRecord().message.c_str(),
+                         "Error", MB_OK | MB_ICONERROR);
+              break;
+            }
+            conn_props.ssl_credentials.pem_root_certs = *pem_or;
+          }
+
+          HWND h_sign_in_btn = GetDlgItem(hwnd, kIdcSignInButton);
+          EnableWindow(h_sign_in_btn, FALSE);
+          auto sign_in_result =
+              odbc_bigquery_client_interface::RunInteractiveOAuthSignIn(
+                  conn_props);
+          EnableWindow(h_sign_in_btn, TRUE);
+
+          if (!sign_in_result) {
+            MessageBox(hwnd, sign_in_result.GetStatusRecord().message.c_str(),
+                       "Error", MB_OK | MB_ICONERROR);
+            break;
+          }
+
+          SetWindowText(GetDlgItem(hwnd, kIdcRefreshTokenEdit),
+                        sign_in_result->refresh_token.c_str());
+          EvaluateFields(hwnd);
+          break;
+        }
         case kIdcBrowseButton: {
           HWND h_edit = GetDlgItem(hwnd, kIdcKeyfileEdit);
           OpenFileDialog(hwnd, h_edit);
@@ -1245,7 +1350,7 @@ LRESULT CALLBACK DriverForm::WindowProc(HWND hwnd, UINT u_msg, WPARAM w_param,
           key_file_path_ = key_buffer;
 
           HWND h_refresh_token = GetDlgItem(hwnd, kIdcRefreshTokenEdit);
-          char refresh_token_buffer[256] = {0};
+          char refresh_token_buffer[4096] = {0};
           GetWindowText(h_refresh_token, refresh_token_buffer,
                         sizeof(refresh_token_buffer));
           refresh_token_ = refresh_token_buffer;
@@ -1368,7 +1473,7 @@ LRESULT CALLBACK DriverForm::WindowProc(HWND hwnd, UINT u_msg, WPARAM w_param,
               encrypt_buffer, min_tls_buffer, trusted_cert_buffer,
               use_trusted_store, description_buffer, proxy_form, adv_form);
 
-          char refresh_token_buffer[256] = {0};
+          char refresh_token_buffer[4096] = {0};
           char client_id_buffer[256] = {0};
           char client_secret_buffer[256] = {0};
           GetWindowText(GetDlgItem(hwnd, kIdcRefreshTokenEdit),
@@ -1385,6 +1490,14 @@ LRESULT CALLBACK DriverForm::WindowProc(HWND hwnd, UINT u_msg, WPARAM w_param,
                BST_CHECKED)
                   ? "1"
                   : "0";
+          for (char const* wif_key :
+               {"BYOID_AudienceUri", "BYOID_AudienceUrl",
+                "BYOID_PoolUserProject", "UniverseCloudWebDomain"}) {
+            auto v = GetValueOrDefault(last_saved_values_, wif_key);
+            if (!v.empty()) {
+              attributes_map[wif_key] = std::move(v);
+            }
+          }
 
           Section logging_section;
           logging_section["LogLevel"] =
